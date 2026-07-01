@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <dlfcn.h>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -219,6 +220,43 @@ static id<MTLTexture> MakeTexture2DArray(id<MTLDevice> device, int w, int h,
   return [device newTextureWithDescriptor:desc];
 }
 
+static void AddMetalLibraryCandidate(NSMutableArray<NSString*>* paths,
+                                     NSString* path) {
+  if (path.length == 0) return;
+  if (![paths containsObject:path]) {
+    [paths addObject:path];
+  }
+}
+
+static NSArray<NSString*>* MetalLibraryCandidatePaths() {
+  NSMutableArray<NSString*>* paths = [NSMutableArray array];
+
+  NSString* configuredPath =
+      [NSString stringWithUTF8String:SIFT_METAL_METALLIB_PATH];
+  AddMetalLibraryCandidate(paths, configuredPath);
+
+  NSString* mainBundlePath =
+      [[NSBundle mainBundle] pathForResource:@"sift" ofType:@"metallib"];
+  AddMetalLibraryCandidate(paths, mainBundlePath);
+
+  Dl_info imageInfo;
+  if (dladdr(reinterpret_cast<const void*>(&MetalLibraryCandidatePaths),
+             &imageInfo) != 0 &&
+      imageInfo.dli_fname != nullptr) {
+    NSString* imagePath = [NSString stringWithUTF8String:imageInfo.dli_fname];
+    NSString* imageDir = [imagePath stringByDeletingLastPathComponent];
+    AddMetalLibraryCandidate(
+        paths, [imageDir stringByAppendingPathComponent:@"sift.metallib"]);
+    AddMetalLibraryCandidate(
+        paths, [imageDir stringByAppendingPathComponent:@"Resources/sift.metallib"]);
+    AddMetalLibraryCandidate(
+        paths,
+        [imageDir stringByAppendingPathComponent:@"../Resources/sift.metallib"]);
+  }
+
+  return paths;
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -232,13 +270,18 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   commandQueue_ = [device_ newCommandQueue];
   if (!commandQueue_) return false;
 
-  // Load the pre-compiled metal library.
+  // Load the pre-compiled Metal library from the build tree or bundle.
   NSError* error = nil;
-  NSString* libPath =
-      [NSString stringWithUTF8String:SIFT_METAL_METALLIB_PATH];
-  if (libPath.length > 0) {
-    NSURL* libURL = [NSURL fileURLWithPath:libPath];
-    library_ = [device_ newLibraryWithURL:libURL error:&error];
+  NSFileManager* fileManager = [NSFileManager defaultManager];
+  for (NSString* libPath in MetalLibraryCandidatePaths()) {
+    if (![fileManager fileExistsAtPath:libPath]) {
+      continue;
+    }
+    library_ = [device_ newLibraryWithURL:[NSURL fileURLWithPath:libPath]
+                                    error:&error];
+    if (library_) {
+      break;
+    }
   }
   if (!library_) {
     // Fallback: try default library.

@@ -37,6 +37,7 @@
 #include "colmap/util/logging.h"
 
 #include <cassert>
+#include <limits>
 
 namespace colmap {
 
@@ -75,7 +76,7 @@ ObservationManager::ObservationManager(
   }
 
   // If an existing model was loaded from disk and there were already images
-  // registered previously, we need to set observations as triangulated.
+  // registered previously, we need to initialize the observation bookkeeping.
   for (const image_t image_id : reconstruction_.RegImageIds()) {
     const Image& image = reconstruction_.Image(image_id);
     for (point2D_t point2D_idx = 0; point2D_idx < image.NumPoints2D();
@@ -198,6 +199,9 @@ void ObservationManager::DecrementCorrespondenceHasPoint3D(
   const Point2D& point2D = image.Point2D(point2D_idx);
   ImageStat& stats = image_stats_.at(image_id);
 
+  THROW_CHECK_GT(stats.num_correspondences_have_point3D[point2D_idx], 0)
+      << "Correspondence counter underflow for image " << image_id
+      << " point2D " << point2D_idx;
   stats.num_correspondences_have_point3D[point2D_idx] -= 1;
   if (stats.num_correspondences_have_point3D[point2D_idx] == 0) {
     stats.num_visible_points3D -= 1;
@@ -408,6 +412,9 @@ size_t ObservationManager::FilterObservationsWithNegativeDepth() {
   for (const frame_t frame_id : reconstruction_.RegFrameIds()) {
     for (const data_t& data_id : reconstruction_.Frame(frame_id).ImageIds()) {
       const Image& image = reconstruction_.Image(data_id.id);
+      if (image.CameraPtr()->IsSpherical()) {
+        continue;
+      }
       const Eigen::Matrix3x4d cam_from_world = image.CamFromWorld().ToMatrix();
       for (point2D_t point2D_idx = 0; point2D_idx < image.NumPoints2D();
            ++point2D_idx) {
@@ -494,10 +501,6 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
     const ReprojectionErrorType error_type) {
   size_t num_filtered_observations = 0;
 
-  // Precompute squared/converted thresholds to avoid redundant computations.
-  const double max_squared_error = max_error * max_error;
-  const double max_angular_error_rad = DegToRad(max_error);
-
   for (const auto point3D_id : point3D_ids) {
     if (!reconstruction_.ExistsPoint3D(point3D_id)) {
       continue;
@@ -519,49 +522,49 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
       const Camera& camera = *image.CameraPtr();
       const Point2D& point2D = image.Point2D(track_el.point2D_idx);
 
-      bool should_filter = false;
+      // Each case reports observation_error in the same units as max_error
+      // (pixels, normalized chord length, or degrees). Degenerate observations
+      // that must always be filtered report an infinite error.
       double observation_error = 0.0;
-
       switch (error_type) {
-        case ReprojectionErrorType::PIXEL: {
-          const double squared_error = CalculateSquaredReprojectionError(
-              point2D.xy, point3D.xyz, image.CamFromWorld(), camera);
-          should_filter = squared_error > max_squared_error;
-          observation_error = std::sqrt(squared_error);
+        case ReprojectionErrorType::PIXEL:
+          observation_error = std::sqrt(CalculateSquaredReprojectionError(
+              point2D.xy, point3D.xyz, image.CamFromWorld(), camera));
           break;
-        }
         case ReprojectionErrorType::NORMALIZED: {
           const Eigen::Vector3d point3D_in_cam =
               image.CamFromWorld() * point3D.xyz;
-          constexpr double kMinDepth = 1e-12;
-          if (point3D_in_cam.z() < kMinDepth) {
-            should_filter = true;
-            break;
+          if (camera.IsPerspective()) {
+            constexpr double kMinDepth = 1e-12;
+            const std::optional<Eigen::Vector2d> cam_point =
+                camera.CamFromImg(point2D.xy);
+            observation_error =
+                (point3D_in_cam.z() >= kMinDepth && cam_point.has_value())
+                    ? (point3D_in_cam.hnormalized().head<2>() - *cam_point)
+                          .norm()
+                    : std::numeric_limits<double>::infinity();
+          } else {
+            // Omnidirectional cameras (e.g. EQUIRECTANGULAR) have no pinhole
+            // z-divide and legitimately observe points behind the local +Z
+            // axis, so the cheirality gate and 2D CamFromImg above do not
+            // apply. Compare unit bearings instead (chord distance ~= angle for
+            // small errors, consistent with the normalized threshold).
+            const std::optional<Eigen::Vector3d> cam_ray =
+                camera.CamRayFromImg(point2D.xy);
+            observation_error =
+                cam_ray.has_value()
+                    ? (point3D_in_cam.normalized() - *cam_ray).norm()
+                    : std::numeric_limits<double>::infinity();
           }
-          const std::optional<Eigen::Vector2d> cam_point =
-              camera.CamFromImg(point2D.xy);
-          if (!cam_point.has_value()) {
-            should_filter = true;
-            break;
-          }
-          const Eigen::Vector2d reproj_point =
-              point3D_in_cam.hnormalized().head<2>();
-          const double squared_error =
-              (reproj_point - *cam_point).squaredNorm();
-          should_filter = squared_error > max_squared_error;
-          observation_error = std::sqrt(squared_error);
           break;
         }
-        case ReprojectionErrorType::ANGULAR: {
-          const double error = CalculateAngularReprojectionError(
-              point2D.xy, point3D.xyz, image.CamFromWorld(), camera);
-          should_filter = error > max_angular_error_rad;
-          observation_error = RadToDeg(error);
+        case ReprojectionErrorType::ANGULAR:
+          observation_error = RadToDeg(CalculateAngularReprojectionError(
+              point2D.xy, point3D.xyz, image.CamFromWorld(), camera));
           break;
-        }
       }
 
-      if (should_filter) {
+      if (observation_error > max_error) {
         track_els_to_delete.push_back(track_el);
       } else {
         error_sum += observation_error;
@@ -585,7 +588,7 @@ size_t ObservationManager::FilterPoints3DWithLargeReprojectionError(
 
 void ObservationManager::RegisterFrame(const frame_t frame_id) {
   const Frame& frame = reconstruction_.Frame(frame_id);
-  for (const data_t& data_id : frame.DataIds()) {
+  for (const data_t& data_id : frame.ImageIds()) {
     Image& image = reconstruction_.Image(data_id.id);
     const auto num_points2D = image.NumPoints2D();
     for (point2D_t point2D_idx = 0; point2D_idx < num_points2D; ++point2D_idx) {
@@ -603,7 +606,7 @@ void ObservationManager::RegisterFrame(const frame_t frame_id) {
 
 void ObservationManager::DeRegisterFrame(const frame_t frame_id) {
   const Frame& frame = reconstruction_.Frame(frame_id);
-  for (const data_t& data_id : frame.DataIds()) {
+  for (const data_t& data_id : frame.ImageIds()) {
     Image& image = reconstruction_.Image(data_id.id);
     const auto num_points2D = image.NumPoints2D();
     for (point2D_t point2D_idx = 0; point2D_idx < num_points2D; ++point2D_idx) {
@@ -611,7 +614,11 @@ void ObservationManager::DeRegisterFrame(const frame_t frame_id) {
         const auto corr_range =
             correspondence_graph_->FindCorrespondences(data_id.id, point2D_idx);
         for (const auto* corr = corr_range.beg; corr < corr_range.end; ++corr) {
-          image_stats_[corr->image_id].num_visible_correspondences -= 1;
+          auto& stats = image_stats_[corr->image_id];
+          THROW_CHECK_GT(stats.num_visible_correspondences, 0)
+              << "Visible correspondences underflow for image "
+              << corr->image_id << " when deregistering frame " << frame_id;
+          stats.num_visible_correspondences -= 1;
         }
       }
       if (image.Point2D(point2D_idx).HasPoint3D()) {
@@ -622,37 +629,31 @@ void ObservationManager::DeRegisterFrame(const frame_t frame_id) {
   reconstruction_.DeRegisterFrame(frame_id);
 }
 
-std::vector<frame_t> ObservationManager::FilterFrames(
+std::vector<frame_t> ObservationManager::FindFramesToFilter(
     const double min_focal_length_ratio,
     const double max_focal_length_ratio,
-    const double max_extra_param) {
-  std::vector<frame_t> filtered_frame_ids;
+    const double max_extra_param,
+    const int min_num_observations) const {
+  std::vector<frame_t> frame_ids;
   for (const frame_t frame_id : reconstruction_.RegFrameIds()) {
     const Frame& frame = reconstruction_.Frame(frame_id);
-    int num_points3D = 0;
+    bool bogus_camera = false;
+    int num_observations = 0;
     for (const data_t& data_id : frame.ImageIds()) {
       const Image& image = reconstruction_.Image(data_id.id);
-      num_points3D += image.NumPoints3D();
+      num_observations += image.NumPoints3D();
       if (image.CameraPtr()->HasBogusParams(min_focal_length_ratio,
                                             max_focal_length_ratio,
                                             max_extra_param)) {
-        // Flag the frame for filtering.
-        num_points3D = 0;
+        bogus_camera = true;
         break;
       }
     }
-    if (num_points3D == 0) {
-      filtered_frame_ids.push_back(frame_id);
+    if (bogus_camera || num_observations < min_num_observations) {
+      frame_ids.push_back(frame_id);
     }
   }
-
-  // Only de-register after iterating over reg_frame_ids_ to avoid
-  // simultaneous iteration and modification of the vector.
-  for (const frame_t frame_id : filtered_frame_ids) {
-    DeRegisterFrame(frame_id);
-  }
-
-  return filtered_frame_ids;
+  return frame_ids;
 }
 
 std::ostream& operator<<(std::ostream& stream,

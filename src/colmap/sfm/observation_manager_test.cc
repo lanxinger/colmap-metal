@@ -40,7 +40,8 @@ void GenerateReconstruction(const image_t num_images,
                             Reconstruction& reconstruction) {
   const size_t kNumPoints2D = 10;
 
-  Camera camera = Camera::CreateFromModelName(1, "PINHOLE", 1, 1, 1);
+  Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 1, 1, 1);
   reconstruction.AddCamera(camera);
 
   Rig rig;
@@ -209,6 +210,62 @@ TEST(ObservationManager, FilterPoints3DWithLargeReprojectionErrorTypes) {
             2);
 }
 
+TEST(ObservationManager, FilterPoints3DSphericalSeam) {
+  Reconstruction reconstruction;
+  const camera_t kCameraId = 1;
+  Camera camera =
+      Camera::CreateFromModelId(kCameraId,
+                                EquirectangularCameraModel::model_id,
+                                /*focal_length=*/0.0,
+                                1000,
+                                500);
+  reconstruction.AddCamera(camera);
+
+  Rig rig;
+  rig.SetRigId(1);
+  rig.AddRefSensor(camera.SensorId());
+  reconstruction.AddRig(rig);
+
+  Frame frame;
+  frame.SetFrameId(1);
+  frame.SetRigId(rig.RigId());
+  frame.AddDataId(data_t(camera.SensorId(), 1));
+  frame.AddDataId(data_t(camera.SensorId(), 2));
+  frame.SetRigFromWorld(Rigid3d());
+  reconstruction.AddFrame(frame);
+
+  // Both images observe the back direction (0, 0, -1) at the x = 0 seam
+  // representation; the point projects to x = w. A raw pixel error would be
+  // ~width across the seam, but the spherical reprojection error is
+  // seam-invariant and ~0.
+  Image image1;
+  image1.SetImageId(1);
+  image1.SetCameraId(kCameraId);
+  image1.SetFrameId(1);
+  image1.SetPoints2D({Eigen::Vector2d(0, 250)});
+  reconstruction.AddImage(image1);
+
+  Image image2;
+  image2.SetImageId(2);
+  image2.SetCameraId(kCameraId);
+  image2.SetFrameId(1);
+  image2.SetPoints2D({Eigen::Vector2d(0, 250)});
+  reconstruction.AddImage(image2);
+
+  ObservationManager obs_manager(reconstruction);
+
+  const point3D_t id =
+      reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, -2), Track());
+  reconstruction.AddObservation(id, TrackElement(1, 0));
+  reconstruction.AddObservation(id, TrackElement(2, 0));
+
+  // The seam-straddling exact match is not filtered (a pixel metric would
+  // wrongly drop it with a ~width error).
+  EXPECT_EQ(obs_manager.FilterPoints3DWithLargeReprojectionError(
+                /*max_error=*/1.0, {id}, ReprojectionErrorType::PIXEL),
+            0);
+}
+
 TEST(ObservationManager, FilterPoints3DInImages) {
   Reconstruction reconstruction;
   GenerateReconstruction(2, reconstruction);
@@ -365,18 +422,23 @@ TEST(ObservationManager, FilterFrames) {
   obs_manager.AddObservation(point3D_id1, TrackElement(1, 0));
   obs_manager.AddObservation(point3D_id1, TrackElement(2, 0));
   obs_manager.AddObservation(point3D_id1, TrackElement(3, 0));
-  obs_manager.FilterFrames(/*min_focal_length_ratio=*/0.0,
-                           /*max_focal_length_ratio=*/10.0,
-                           /*max_extra_param=*/1.0);
+  auto filter_frames = [&obs_manager](double min_focal_length_ratio,
+                                      double max_focal_length_ratio,
+                                      double max_extra_param) {
+    for (const frame_t frame_id : obs_manager.FindFramesToFilter(
+             /*min_focal_length_ratio=*/min_focal_length_ratio,
+             /*max_focal_length_ratio=*/max_focal_length_ratio,
+             /*max_extra_param=*/max_extra_param,
+             /*min_num_observations=*/1)) {
+      obs_manager.DeRegisterFrame(frame_id);
+    }
+  };
+  filter_frames(0.0, 10.0, 1.0);
   EXPECT_EQ(reconstruction.NumRegFrames(), 3);
   reconstruction.DeleteObservation(3, 0);
-  obs_manager.FilterFrames(/*min_focal_length_ratio=*/0.0,
-                           /*max_focal_length_ratio=*/10.0,
-                           /*max_extra_param=*/1.0);
+  filter_frames(0.0, 10.0, 1.0);
   EXPECT_EQ(reconstruction.NumRegFrames(), 2);
-  obs_manager.FilterFrames(/*min_focal_length_ratio=*/0.0,
-                           /*max_focal_length_ratio=*/0.9,
-                           /*max_extra_param=*/1.0);
+  filter_frames(0.0, 0.9, 1.0);
   EXPECT_EQ(reconstruction.NumRegFrames(), 0);
 }
 

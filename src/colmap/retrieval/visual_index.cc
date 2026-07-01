@@ -42,8 +42,6 @@
 #include <boost/heap/fibonacci_heap.hpp>
 #include <faiss/Clustering.h>
 #include <faiss/IndexFlat.h>
-#include <faiss/IndexIVF.h>
-#include <faiss/index_factory.h>
 #include <faiss/index_io.h>
 #include <omp.h>
 
@@ -51,22 +49,11 @@ namespace colmap {
 namespace retrieval {
 namespace {
 
-std::unique_ptr<faiss::IndexIVF> BuildFaissIndex(
+std::unique_ptr<faiss::Index> BuildFaissIndex(
     const VisualIndex::BuildOptions& options,
     const Eigen::RowMajorMatrixXf& visual_words) {
-  const int64_t num_centroids = std::min<int64_t>(
-      visual_words.rows(), 2 * std::sqrt(visual_words.rows()));
-  const int64_t spectral_hash_dim =
-      std::min<int64_t>(visual_words.rows(), visual_words.cols() / 2);
-  std::ostringstream index_type;
-  index_type << "IVF" << num_centroids << ",ITQ" << spectral_hash_dim << ",SH";
-  VLOG(2) << "Training " << index_type.str()
-          << " search index for visual words";
-  const auto index_factory_verbose = faiss::index_factory_verbose;
-  faiss::index_factory_verbose = VLOG_IS_ON(3);
-  auto index = std::unique_ptr<faiss::IndexIVF>(dynamic_cast<faiss::IndexIVF*>(
-      faiss::index_factory(visual_words.cols(), index_type.str().c_str())));
-  faiss::index_factory_verbose = index_factory_verbose;
+  VLOG(2) << "Building flat search index for visual words";
+  auto index = std::make_unique<faiss::IndexFlatL2>(visual_words.cols());
 
 #pragma omp parallel num_threads(1)
   {
@@ -77,7 +64,6 @@ std::unique_ptr<faiss::IndexIVF> BuildFaissIndex(
     omp_set_max_active_levels(1);
 #endif
 
-    index->train(visual_words.rows(), visual_words.data());
     index->add(visual_words.rows(), visual_words.data());
   }
 
@@ -476,8 +462,8 @@ class FaissVisualIndex : public VisualIndex {
 #endif
     THROW_CHECK_NOTNULL(fin);
     fseek(fin, offset, SEEK_SET);
-    index_ = std::unique_ptr<faiss::IndexIVF>(dynamic_cast<faiss::IndexIVF*>(
-        THROW_CHECK_NOTNULL(faiss::read_index(fin))));
+    index_ = std::unique_ptr<faiss::Index>(THROW_CHECK_NOTNULL(
+        faiss::read_index(fin)));
     offset = ftell(fin);
     fclose(fin);
 
@@ -540,13 +526,33 @@ class FaissVisualIndex : public VisualIndex {
       const BuildOptions& options,
       const FeatureDescriptorsFloatData& descriptors) const {
     THROW_CHECK_EQ(descriptors.cols(), kDescDim);
+    THROW_CHECK_GT(descriptors.rows(), 0);
+    THROW_CHECK_GT(options.num_visual_words, 0);
 
     VLOG(2) << "Clustering " << descriptors.rows()
             << " descriptors using kmeans";
 
+    constexpr int kMinPointsPerCentroid = 100;
+    const int64_t num_descriptors = descriptors.rows();
+    const int64_t min_training_descriptors =
+        static_cast<int64_t>(options.num_visual_words) * kMinPointsPerCentroid;
+    if (num_descriptors < min_training_descriptors) {
+      // Avoid unstable k-means training when the vocabulary is heavily
+      // undersampled; small vocabularies are mainly used by tests and tools.
+      Eigen::RowMajorMatrixXf visual_words(options.num_visual_words, kDescDim);
+      for (Eigen::Index i = 0; i < visual_words.rows(); ++i) {
+        const Eigen::Index descriptor_idx = std::min<Eigen::Index>(
+            (i * descriptors.rows()) / visual_words.rows(),
+            descriptors.rows() - 1);
+        visual_words.row(i) = descriptors.row(descriptor_idx);
+      }
+      return visual_words;
+    }
+
     faiss::Clustering clustering(kDescDim, options.num_visual_words);
     clustering.niter = options.num_iterations;
     clustering.nredo = options.num_rounds;
+    clustering.min_points_per_centroid = 1;
     clustering.verbose = VLOG_IS_ON(3);
 
     faiss::IndexFlatL2 index(kDescDim);
@@ -614,9 +620,6 @@ class FaissVisualIndex : public VisualIndex {
     WordIds word_ids(descriptors.rows(), num_neighbors);
     Eigen::RowMajorMatrixXf distances(descriptors.rows(), num_neighbors);
 
-    faiss::IVFSearchParameters search_params;
-    search_params.nprobe = num_checks;
-
 #pragma omp parallel num_threads(1)
     {
       omp_set_num_threads(GetEffectiveNumThreads(num_threads));
@@ -630,16 +633,14 @@ class FaissVisualIndex : public VisualIndex {
                      descriptors.data(),
                      num_neighbors,
                      distances.data(),
-                     word_ids.data(),
-                     &search_params);
+                     word_ids.data());
     }
 
     return word_ids;
   }
 
   // The search structure on the quantized descriptor space.
-  std::unique_ptr<faiss::IndexIVF> index_;
-  std::unique_ptr<faiss::Index> quantizer_;
+  std::unique_ptr<faiss::Index> index_;
 
   // The inverted index of the database.
   InvertedIndexType inverted_index_;

@@ -231,10 +231,6 @@ static void AddMetalLibraryCandidate(NSMutableArray<NSString*>* paths,
 static NSArray<NSString*>* MetalLibraryCandidatePaths() {
   NSMutableArray<NSString*>* paths = [NSMutableArray array];
 
-  NSString* configuredPath =
-      [NSString stringWithUTF8String:SIFT_METAL_METALLIB_PATH];
-  AddMetalLibraryCandidate(paths, configuredPath);
-
   NSString* mainBundlePath =
       [[NSBundle mainBundle] pathForResource:@"sift" ofType:@"metallib"];
   AddMetalLibraryCandidate(paths, mainBundlePath);
@@ -253,6 +249,10 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
         paths,
         [imageDir stringByAppendingPathComponent:@"../Resources/sift.metallib"]);
   }
+
+  NSString* configuredPath =
+      [NSString stringWithUTF8String:SIFT_METAL_METALLIB_PATH];
+  AddMetalLibraryCandidate(paths, configuredPath);
 
   return paths;
 }

@@ -70,6 +70,15 @@ COLMAP_ADD_LIBRARY(
         faiss
 )
 
+if(TARGET faiss)
+    get_target_property(COLMAP_FAISS_INCLUDE_DIRS
+                        faiss INTERFACE_INCLUDE_DIRECTORIES)
+    if(COLMAP_FAISS_INCLUDE_DIRS)
+        target_include_directories(
+            colmap_feature BEFORE PRIVATE ${COLMAP_FAISS_INCLUDE_DIRS})
+    endif()
+endif()
+
 if(METAL_ENABLED)
     target_link_libraries(colmap_feature PRIVATE colmap_sift_metal)
 elseif(GPU_ENABLED)

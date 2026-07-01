@@ -149,6 +149,31 @@ TEST(FeatureDescriptorIndexTests, TypeMismatch) {
                std::invalid_argument);
 }
 
+TEST(FeatureDescriptorIndexTests, SearchCapsNeighborsToIndexSize) {
+  std::unique_ptr<FeatureDescriptorIndex> index;
+  try {
+    index = FeatureDescriptorIndex::Create(FeatureDescriptorIndex::Type::FAISS);
+  } catch (const std::runtime_error& e) {
+    GTEST_SKIP() << "Skipping test due to: " << e.what();
+  }
+  ASSERT_NE(index, nullptr);
+
+  const FeatureDescriptorsFloat index_descriptors =
+      CreateRandomFeatureDescriptors(1);
+  index->Build(index_descriptors);
+
+  Eigen::RowMajorMatrixXi indices;
+  Eigen::RowMajorMatrixXf distances;
+  index->Search(/*num_neighbors=*/2, index_descriptors, indices, distances);
+
+  ASSERT_EQ(indices.rows(), 1);
+  ASSERT_EQ(indices.cols(), 1);
+  ASSERT_EQ(distances.rows(), 1);
+  ASSERT_EQ(distances.cols(), 1);
+  EXPECT_EQ(indices(0, 0), 0);
+  EXPECT_NEAR(distances(0, 0), 0, 1e-6);
+}
+
 INSTANTIATE_TEST_SUITE_P(
     FeatureDescriptorIndexTests,
     ParameterizedFeatureDescriptorIndexTests,

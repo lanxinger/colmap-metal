@@ -47,8 +47,11 @@ class FaissFeatureDescriptorIndex : public FeatureDescriptorIndex {
 
   void Build(const FeatureDescriptorsFloat& index_descriptors) override {
     type_ = index_descriptors.type;
+    index_.reset();
+    coarse_quantizer_.reset();
+    use_ivf_search_params_ = false;
+
     if (index_descriptors.data.rows() == 0) {
-      index_ = nullptr;
       return;
     }
 
@@ -69,6 +72,7 @@ class FaissFeatureDescriptorIndex : public FeatureDescriptorIndex {
             /*quantizer=*/coarse_quantizer_.get(),
             /*d=*/index_descriptors.data.cols(),
             /*nlist_=*/num_centroids);
+        use_ivf_search_params_ = true;
         auto* index_impl = dynamic_cast<faiss::IndexIVFFlat*>(index_.get());
         // Avoid warnings during the training phase.
         index_impl->cp.min_points_per_centroid = 1;
@@ -100,11 +104,18 @@ class FaissFeatureDescriptorIndex : public FeatureDescriptorIndex {
     THROW_CHECK_EQ(query_descriptors.data.cols(), index_->d);
     const int64_t num_query_descriptors = query_descriptors.data.rows();
     if (num_query_descriptors == 0) {
+      indices.resize(0, 0);
+      l2_dists.resize(0, 0);
       return;
     }
 
     const int64_t num_eff_neighbors =
         std::min<int64_t>(num_neighbors, index_->ntotal);
+    if (num_eff_neighbors == 0) {
+      indices.resize(num_query_descriptors, 0);
+      l2_dists.resize(num_query_descriptors, 0);
+      return;
+    }
 
     l2_dists.resize(num_query_descriptors, num_eff_neighbors);
     Eigen::Matrix<int64_t, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>
@@ -119,14 +130,22 @@ class FaissFeatureDescriptorIndex : public FeatureDescriptorIndex {
       omp_set_max_active_levels(1);
 #endif
 
-      faiss::SearchParametersIVF search_params;
-      search_params.nprobe = 8;
-      index_->search(num_query_descriptors,
-                     query_descriptors.data.data(),
-                     num_eff_neighbors,
-                     l2_dists.data(),
-                     indices_long.data(),
-                     &search_params);
+      if (use_ivf_search_params_) {
+        faiss::SearchParametersIVF search_params;
+        search_params.nprobe = 8;
+        index_->search(num_query_descriptors,
+                       query_descriptors.data.data(),
+                       num_eff_neighbors,
+                       l2_dists.data(),
+                       indices_long.data(),
+                       &search_params);
+      } else {
+        index_->search(num_query_descriptors,
+                       query_descriptors.data.data(),
+                       num_eff_neighbors,
+                       l2_dists.data(),
+                       indices_long.data());
+      }
     }
 
     indices = indices_long.cast<int>();
@@ -137,6 +156,7 @@ class FaissFeatureDescriptorIndex : public FeatureDescriptorIndex {
   FeatureExtractorType type_ = FeatureExtractorType::UNDEFINED;
   std::unique_ptr<faiss::Index> index_;
   std::unique_ptr<faiss::IndexFlatL2> coarse_quantizer_;
+  bool use_ivf_search_params_ = false;
 };
 
 }  // namespace

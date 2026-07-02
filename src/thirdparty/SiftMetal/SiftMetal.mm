@@ -267,6 +267,7 @@ class SiftMetalMatcherImpl {
   id<MTLLibrary> library_;
   id<MTLComputePipelineState> siftMatchBestPipeline_;
   id<MTLComputePipelineState> siftMatchBestDotParallelPipeline_;
+  id<MTLBuffer> dummyKeypointBuffer_;
   std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
   size_t descriptor_buffer_cache_bytes_ = 0;
   uint64_t descriptor_buffer_cache_tick_ = 0;
@@ -309,8 +310,14 @@ bool SiftMetalMatcherImpl::Init() {
   siftMatchBestPipeline_ = MakePipeline(device_, library_, "siftMatchBest");
   siftMatchBestDotParallelPipeline_ =
       MakePipeline(device_, library_, "siftMatchBestDotParallel");
+  const SIFTMatcherKeypoint dummy_keypoint = {0.0f, 0.0f};
+  dummyKeypointBuffer_ =
+      [device_ newBufferWithBytes:&dummy_keypoint
+                           length:sizeof(dummy_keypoint)
+                          options:MTLResourceStorageModeShared];
   return siftMatchBestPipeline_ != nil &&
-         siftMatchBestDotParallelPipeline_ != nil;
+         siftMatchBestDotParallelPipeline_ != nil &&
+         dummyKeypointBuffer_ != nil;
 }
 
 id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
@@ -401,7 +408,6 @@ bool SiftMetalMatcherImpl::RunOneWay(
     return false;
   }
 
-  const SIFTMatcherKeypoint dummy_keypoint = {0.0f, 0.0f};
   const bool guided = guided_geometry != MatchGuidedGeometry::NONE;
   id<MTLBuffer> keypoints1Buffer = nil;
   id<MTLBuffer> keypoints2Buffer = nil;
@@ -420,14 +426,8 @@ bool SiftMetalMatcherImpl::RunOneWay(
                                     sizeof(SIFTMatcherKeypoint)
                             options:MTLResourceStorageModeShared];
   } else {
-    keypoints1Buffer =
-        [device_ newBufferWithBytes:&dummy_keypoint
-                             length:sizeof(dummy_keypoint)
-                            options:MTLResourceStorageModeShared];
-    keypoints2Buffer =
-        [device_ newBufferWithBytes:&dummy_keypoint
-                             length:sizeof(dummy_keypoint)
-                            options:MTLResourceStorageModeShared];
+    keypoints1Buffer = dummyKeypointBuffer_;
+    keypoints2Buffer = dummyKeypointBuffer_;
   }
   if (!keypoints1Buffer || !keypoints2Buffer) {
     return false;

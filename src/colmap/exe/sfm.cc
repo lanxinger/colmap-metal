@@ -112,6 +112,8 @@ int RunAutomaticReconstructor(int argc, char** argv) {
                            &reconstruction_options.camera_params);
   options.AddDefaultOption("extraction", &reconstruction_options.extraction);
   options.AddDefaultOption("matching", &reconstruction_options.matching);
+  options.AddDefaultOption("guided_matching",
+                           &reconstruction_options.guided_matching);
   options.AddDefaultOption("sparse", &reconstruction_options.sparse);
   options.AddDefaultOption("dense", &reconstruction_options.dense);
   options.AddDefaultOption("feature", &feature, "{sift, aliked}");

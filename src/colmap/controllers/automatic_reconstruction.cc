@@ -165,6 +165,9 @@ AutomaticReconstructionController::AutomaticReconstructionController(
     // threshold for it.
     option_manager_.feature_matching->guided_matching = false;
   }
+  if (!options_.guided_matching) {
+    option_manager_.feature_matching->guided_matching = false;
+  }
 
   option_manager_.mapper->random_seed = options_.random_seed;
 

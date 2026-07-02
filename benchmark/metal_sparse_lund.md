@@ -48,3 +48,31 @@ The log confirmed Metal was used for both sparse GPU stages:
 This small real-image run shows matching and geometric verification dominate
 the current sparse Metal workflow, followed by CPU sparse mapping. Feature
 extraction is no longer the primary bottleneck on this dataset.
+
+## Guided Matching Toggle
+
+The automatic reconstructor now exposes `--guided_matching` as an opt-out for
+quality presets that enable guided matching. On this dataset, disabling guided
+matching reduced runtime but significantly reduced reconstruction coverage:
+
+```bash
+/usr/bin/time -p build-metal/src/colmap/exe/colmap automatic_reconstructor \
+  --workspace_path /private/tmp/colmap-metal-benchmark-lund-no-guided \
+  --image_path /Users/markus/GIT/OpenSfM/data/lund/images \
+  --dense 0 \
+  --use_gpu 1 \
+  --guided_matching 0
+```
+
+| Metric | Guided matching | Guided matching disabled |
+|---|---:|---:|
+| Total wall time | 7.36 s | 5.64 s |
+| Feature matching + verification | 0.065 min | 0.060 min |
+| Registered images | 13 | 2 |
+| Sparse points | 213 | 38 |
+| Observations | 660 | 76 |
+| Mean reprojection error | 0.916758 px | 0.825889 px |
+
+For Gaussian splat training datasets, leave guided matching enabled by default
+unless the capture set has enough redundancy that the lower registration rate is
+acceptable.

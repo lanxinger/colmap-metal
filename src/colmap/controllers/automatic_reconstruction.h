@@ -91,6 +91,9 @@ class AutomaticReconstructionController : public Thread {
     // Whether to perform feature matching.
     bool matching = true;
 
+    // Whether quality presets are allowed to enable guided feature matching.
+    bool guided_matching = true;
+
     // Whether to perform sparse mapping.
     bool sparse = true;
 

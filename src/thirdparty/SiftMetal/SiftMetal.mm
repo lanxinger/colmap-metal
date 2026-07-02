@@ -12,11 +12,14 @@
 #include "include/SIFTDescriptor.h"
 #include "include/SIFTExtrema.h"
 #include "include/SIFTInterpolate.h"
+#include "include/SIFTMatcher.h"
 #include "include/SIFTOrientation.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <dlfcn.h>
 #include <numeric>
 #include <string>
@@ -218,6 +221,247 @@ static id<MTLTexture> MakeTexture2DArray(id<MTLDevice> device, int w, int h,
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   desc.storageMode = storage;
   return [device newTextureWithDescriptor:desc];
+}
+
+static NSArray<NSString*>* MetalLibraryCandidatePaths();
+
+// ---------------------------------------------------------------------------
+// SiftMetalMatcherImpl
+// ---------------------------------------------------------------------------
+class SiftMetalMatcherImpl {
+ public:
+  bool Init();
+  bool Match(const uint8_t* descriptors1, int num_descriptors1,
+             const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
+             int num_descriptors2, const MatchKeypoint* keypoints2,
+             const MatchOptions& options,
+             MatchGuidedGeometry guided_geometry,
+             const float matrix[9], float max_residual,
+             std::vector<MatchResult>* matches);
+
+ private:
+  bool RunOneWay(const uint8_t* descriptors1, int num_descriptors1,
+                 const MatchKeypoint* keypoints1,
+                 const uint8_t* descriptors2, int num_descriptors2,
+                 const MatchKeypoint* keypoints2,
+                 const MatchOptions& options,
+                 MatchGuidedGeometry guided_geometry,
+                 const float matrix[9], float max_residual,
+                 bool reverse_guided,
+                 std::vector<SIFTMatcherResult>* results);
+
+  id<MTLDevice> device_;
+  id<MTLCommandQueue> commandQueue_;
+  id<MTLLibrary> library_;
+  id<MTLComputePipelineState> siftMatchBestPipeline_;
+};
+
+bool SiftMetalMatcherImpl::Init() {
+  static_assert(sizeof(MatchKeypoint) == sizeof(SIFTMatcherKeypoint),
+                "Match keypoint ABI mismatch");
+  static_assert(offsetof(MatchKeypoint, x) == offsetof(SIFTMatcherKeypoint, x),
+                "Match keypoint x offset mismatch");
+  static_assert(offsetof(MatchKeypoint, y) == offsetof(SIFTMatcherKeypoint, y),
+                "Match keypoint y offset mismatch");
+
+  device_ = MTLCreateSystemDefaultDevice();
+  if (!device_) return false;
+
+  commandQueue_ = [device_ newCommandQueue];
+  if (!commandQueue_) return false;
+
+  NSError* error = nil;
+  NSFileManager* fileManager = [NSFileManager defaultManager];
+  for (NSString* libPath in MetalLibraryCandidatePaths()) {
+    if (![fileManager fileExistsAtPath:libPath]) {
+      continue;
+    }
+    library_ = [device_ newLibraryWithURL:[NSURL fileURLWithPath:libPath]
+                                    error:&error];
+    if (library_) {
+      break;
+    }
+  }
+  if (!library_) {
+    library_ = [device_ newDefaultLibrary];
+  }
+  if (!library_) {
+    NSLog(@"SiftMetal: Failed to load Metal library for matching: %@", error);
+    return false;
+  }
+
+  siftMatchBestPipeline_ = MakePipeline(device_, library_, "siftMatchBest");
+  return siftMatchBestPipeline_ != nil;
+}
+
+bool SiftMetalMatcherImpl::RunOneWay(
+    const uint8_t* descriptors1, int num_descriptors1,
+    const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
+    int num_descriptors2, const MatchKeypoint* keypoints2,
+    const MatchOptions& options, MatchGuidedGeometry guided_geometry,
+    const float matrix[9], float max_residual, bool reverse_guided,
+    std::vector<SIFTMatcherResult>* results) {
+  if (!siftMatchBestPipeline_) {
+    return false;
+  }
+  if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {
+    results->clear();
+    return true;
+  }
+
+  const size_t descriptor_bytes1 =
+      static_cast<size_t>(num_descriptors1) * SIFT_MATCHER_DESCRIPTOR_DIM;
+  const size_t descriptor_bytes2 =
+      static_cast<size_t>(num_descriptors2) * SIFT_MATCHER_DESCRIPTOR_DIM;
+  id<MTLBuffer> descriptors1Buffer =
+      [device_ newBufferWithBytes:descriptors1
+                           length:descriptor_bytes1
+                          options:MTLResourceStorageModeShared];
+  id<MTLBuffer> descriptors2Buffer =
+      [device_ newBufferWithBytes:descriptors2
+                           length:descriptor_bytes2
+                          options:MTLResourceStorageModeShared];
+  if (!descriptors1Buffer || !descriptors2Buffer) {
+    return false;
+  }
+
+  const SIFTMatcherKeypoint dummy_keypoint = {0.0f, 0.0f};
+  const bool guided = guided_geometry != MatchGuidedGeometry::NONE;
+  id<MTLBuffer> keypoints1Buffer = nil;
+  id<MTLBuffer> keypoints2Buffer = nil;
+  if (guided) {
+    if (!keypoints1 || !keypoints2) {
+      return false;
+    }
+    keypoints1Buffer =
+        [device_ newBufferWithBytes:keypoints1
+                             length:static_cast<size_t>(num_descriptors1) *
+                                    sizeof(SIFTMatcherKeypoint)
+                            options:MTLResourceStorageModeShared];
+    keypoints2Buffer =
+        [device_ newBufferWithBytes:keypoints2
+                             length:static_cast<size_t>(num_descriptors2) *
+                                    sizeof(SIFTMatcherKeypoint)
+                            options:MTLResourceStorageModeShared];
+  } else {
+    keypoints1Buffer =
+        [device_ newBufferWithBytes:&dummy_keypoint
+                             length:sizeof(dummy_keypoint)
+                            options:MTLResourceStorageModeShared];
+    keypoints2Buffer =
+        [device_ newBufferWithBytes:&dummy_keypoint
+                             length:sizeof(dummy_keypoint)
+                            options:MTLResourceStorageModeShared];
+  }
+  if (!keypoints1Buffer || !keypoints2Buffer) {
+    return false;
+  }
+
+  SIFTMatcherParameters params = {};
+  params.numDescriptors1 = static_cast<uint32_t>(num_descriptors1);
+  params.numDescriptors2 = static_cast<uint32_t>(num_descriptors2);
+  params.maxRatio = options.max_ratio;
+  params.maxDistance = options.max_distance;
+  params.maxL2Distance =
+      512.0f * 512.0f * options.max_distance * options.max_distance;
+  params.maxRatioSquared = options.max_ratio * options.max_ratio;
+  params.maxResidual = max_residual;
+  params.distanceType = guided ? SIFT_MATCHER_DISTANCE_L2
+                               : SIFT_MATCHER_DISTANCE_DOT_PRODUCT;
+  params.guidedGeometry = static_cast<int32_t>(guided_geometry);
+  params.reverseGuided = reverse_guided ? 1 : 0;
+  if (matrix) {
+    std::memcpy(params.matrix, matrix, 9 * sizeof(float));
+  }
+
+  id<MTLBuffer> paramsBuffer =
+      [device_ newBufferWithBytes:&params
+                           length:sizeof(params)
+                          options:MTLResourceStorageModeShared];
+  const size_t result_bytes =
+      static_cast<size_t>(num_descriptors1) * sizeof(SIFTMatcherResult);
+  id<MTLBuffer> resultsBuffer =
+      [device_ newBufferWithLength:result_bytes
+                            options:MTLResourceStorageModeShared];
+  if (!paramsBuffer || !resultsBuffer) {
+    return false;
+  }
+
+  id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
+  id<MTLComputeCommandEncoder> encoder =
+      [commandBuffer computeCommandEncoder];
+  [encoder setComputePipelineState:siftMatchBestPipeline_];
+  [encoder setBuffer:descriptors1Buffer offset:0 atIndex:0];
+  [encoder setBuffer:descriptors2Buffer offset:0 atIndex:1];
+  [encoder setBuffer:keypoints1Buffer offset:0 atIndex:2];
+  [encoder setBuffer:keypoints2Buffer offset:0 atIndex:3];
+  [encoder setBuffer:paramsBuffer offset:0 atIndex:4];
+  [encoder setBuffer:resultsBuffer offset:0 atIndex:5];
+  const NSUInteger threadsPerThreadgroup =
+      std::min<NSUInteger>(siftMatchBestPipeline_.maxTotalThreadsPerThreadgroup,
+                           256);
+  [encoder dispatchThreads:MTLSizeMake(num_descriptors1, 1, 1)
+      threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
+  [encoder endEncoding];
+  [commandBuffer commit];
+  [commandBuffer waitUntilCompleted];
+
+  if (commandBuffer.error) {
+    NSLog(@"SiftMetal: Matching command buffer failed: %@",
+          commandBuffer.error);
+    return false;
+  }
+
+  results->resize(num_descriptors1);
+  std::memcpy(results->data(), resultsBuffer.contents, result_bytes);
+  return true;
+}
+
+bool SiftMetalMatcherImpl::Match(
+    const uint8_t* descriptors1, int num_descriptors1,
+    const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
+    int num_descriptors2, const MatchKeypoint* keypoints2,
+    const MatchOptions& options, MatchGuidedGeometry guided_geometry,
+    const float matrix[9], float max_residual,
+    std::vector<MatchResult>* matches) {
+  matches->clear();
+  if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {
+    return true;
+  }
+
+  std::vector<SIFTMatcherResult> matches_1to2;
+  if (!RunOneWay(descriptors1, num_descriptors1, keypoints1,
+                 descriptors2, num_descriptors2, keypoints2, options,
+                 guided_geometry, matrix, max_residual,
+                 /*reverse_guided=*/false, &matches_1to2)) {
+    return false;
+  }
+
+  std::vector<SIFTMatcherResult> matches_2to1;
+  if (options.cross_check) {
+    if (!RunOneWay(descriptors2, num_descriptors2, keypoints2,
+                   descriptors1, num_descriptors1, keypoints1, options,
+                   guided_geometry, matrix, max_residual,
+                   /*reverse_guided=*/true, &matches_2to1)) {
+      return false;
+    }
+  }
+
+  matches->reserve(num_descriptors1);
+  for (int i1 = 0; i1 < num_descriptors1; ++i1) {
+    const int i2 = matches_1to2[i1].index;
+    if (i2 < 0) {
+      continue;
+    }
+    if (options.cross_check &&
+        (i2 >= static_cast<int>(matches_2to1.size()) ||
+         matches_2to1[i2].index != i1)) {
+      continue;
+    }
+    matches->push_back(
+        MatchResult{static_cast<uint32_t>(i1), static_cast<uint32_t>(i2)});
+  }
+  return true;
 }
 
 static void AddMetalLibraryCandidate(NSMutableArray<NSString*>* paths,
@@ -1122,6 +1366,56 @@ bool SiftMetalExtractor::Init(const Options& options, int max_w, int max_h) {
 bool SiftMetalExtractor::Extract(const uint8_t* data, int w, int h,
                                   ExtractResult* result) {
   return impl_->Extract(data, w, h, result);
+}
+
+SiftMetalMatcher::SiftMetalMatcher()
+    : impl_(std::make_unique<SiftMetalMatcherImpl>()) {}
+
+SiftMetalMatcher::~SiftMetalMatcher() = default;
+
+bool SiftMetalMatcher::Init() { return impl_->Init(); }
+
+bool SiftMetalMatcher::Match(const uint8_t* descriptors1,
+                             int num_descriptors1,
+                             const uint8_t* descriptors2,
+                             int num_descriptors2,
+                             const MatchOptions& options,
+                             std::vector<MatchResult>* matches) {
+  return impl_->Match(descriptors1,
+                      num_descriptors1,
+                      nullptr,
+                      descriptors2,
+                      num_descriptors2,
+                      nullptr,
+                      options,
+                      MatchGuidedGeometry::NONE,
+                      nullptr,
+                      0.0f,
+                      matches);
+}
+
+bool SiftMetalMatcher::MatchGuided(const uint8_t* descriptors1,
+                                   int num_descriptors1,
+                                   const MatchKeypoint* keypoints1,
+                                   const uint8_t* descriptors2,
+                                   int num_descriptors2,
+                                   const MatchKeypoint* keypoints2,
+                                   const MatchOptions& options,
+                                   MatchGuidedGeometry guided_geometry,
+                                   const float matrix[9],
+                                   float max_residual,
+                                   std::vector<MatchResult>* matches) {
+  return impl_->Match(descriptors1,
+                      num_descriptors1,
+                      keypoints1,
+                      descriptors2,
+                      num_descriptors2,
+                      keypoints2,
+                      options,
+                      guided_geometry,
+                      matrix,
+                      max_residual,
+                      matches);
 }
 
 }  // namespace sift_metal

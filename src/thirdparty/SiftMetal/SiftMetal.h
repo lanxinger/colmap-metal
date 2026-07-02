@@ -43,8 +43,31 @@ struct Options {
   bool upright = false;
 };
 
+struct MatchKeypoint {
+  float x;
+  float y;
+};
+
+enum class MatchGuidedGeometry {
+  NONE = 0,
+  EPIPOLAR = 1,
+  HOMOGRAPHY = 2,
+};
+
+struct MatchOptions {
+  float max_ratio = 0.8f;
+  float max_distance = 0.7f;
+  bool cross_check = true;
+};
+
+struct MatchResult {
+  uint32_t index1;
+  uint32_t index2;
+};
+
 // Opaque implementation handle.
 class SiftMetalExtractorImpl;
+class SiftMetalMatcherImpl;
 
 class SiftMetalExtractor {
  public:
@@ -62,6 +85,35 @@ class SiftMetalExtractor {
 
  private:
   std::unique_ptr<SiftMetalExtractorImpl> impl_;
+};
+
+class SiftMetalMatcher {
+ public:
+  SiftMetalMatcher();
+  ~SiftMetalMatcher();
+
+  // Initialize the Metal matching pipeline. Returns false if Metal is
+  // unavailable.
+  bool Init();
+
+  bool Match(const uint8_t* descriptors1, int num_descriptors1,
+             const uint8_t* descriptors2, int num_descriptors2,
+             const MatchOptions& options, std::vector<MatchResult>* matches);
+
+  // matrix is row-major. For EPIPOLAR, it is E/F. For HOMOGRAPHY, it maps
+  // image1 points to image2 points.
+  bool MatchGuided(const uint8_t* descriptors1, int num_descriptors1,
+                   const MatchKeypoint* keypoints1,
+                   const uint8_t* descriptors2, int num_descriptors2,
+                   const MatchKeypoint* keypoints2,
+                   const MatchOptions& options,
+                   MatchGuidedGeometry guided_geometry,
+                   const float matrix[9],
+                   float max_residual,
+                   std::vector<MatchResult>* matches);
+
+ private:
+  std::unique_ptr<SiftMetalMatcherImpl> impl_;
 };
 
 }  // namespace sift_metal

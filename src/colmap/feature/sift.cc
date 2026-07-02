@@ -1342,6 +1342,181 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
   std::shared_ptr<FeatureDescriptorIndex> index2_;
 };
 
+#if defined(COLMAP_METAL_ENABLED)
+std::vector<sift_metal::MatchKeypoint> ToMetalMatchKeypoints(
+    const FeatureKeypoints& keypoints) {
+  std::vector<sift_metal::MatchKeypoint> metal_keypoints(keypoints.size());
+  for (size_t i = 0; i < keypoints.size(); ++i) {
+    metal_keypoints[i] = {keypoints[i].x, keypoints[i].y};
+  }
+  return metal_keypoints;
+}
+
+std::array<float, 9> ToRowMajorArray(const Eigen::Matrix3f& matrix) {
+  std::array<float, 9> data;
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      data[3 * r + c] = matrix(r, c);
+    }
+  }
+  return data;
+}
+
+void ConvertMetalMatches(const std::vector<sift_metal::MatchResult>& input,
+                         FeatureMatches* output) {
+  output->clear();
+  output->reserve(input.size());
+  for (const auto& match : input) {
+    output->push_back(FeatureMatch{match.index1, match.index2});
+  }
+}
+
+class SiftMetalFeatureMatcher : public FeatureMatcher {
+ public:
+  explicit SiftMetalFeatureMatcher(const FeatureMatchingOptions& options)
+      : options_(options) {
+    THROW_CHECK(options_.sift->Check());
+  }
+
+  static std::unique_ptr<FeatureMatcher> Create(
+      const FeatureMatchingOptions& options) {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
+    auto matcher = std::make_unique<SiftMetalFeatureMatcher>(options);
+    if (!matcher->matcher_.Init()) {
+      LOG(ERROR) << "Failed to initialize Metal SIFT feature matcher";
+      return nullptr;
+    }
+    return matcher;
+  }
+
+  void Match(const Image& image1,
+             const Image& image2,
+             FeatureMatches* matches) override {
+    THROW_CHECK_NOTNULL(matches);
+    ThrowCheckFeatureTypesMatch(image1, image2);
+
+    matches->clear();
+    if (image1.descriptors->data.rows() == 0 ||
+        image2.descriptors->data.rows() == 0) {
+      return;
+    }
+
+    const sift_metal::MatchOptions match_options{
+        static_cast<float>(options_.sift->max_ratio),
+        static_cast<float>(options_.sift->max_distance),
+        options_.sift->cross_check};
+    std::vector<sift_metal::MatchResult> metal_matches;
+    if (!matcher_.Match(image1.descriptors->data.data(),
+                        image1.descriptors->data.rows(),
+                        image2.descriptors->data.data(),
+                        image2.descriptors->data.rows(),
+                        match_options,
+                        &metal_matches)) {
+      LOG(ERROR) << "Metal SIFT feature matching failed";
+      return;
+    }
+    ConvertMetalMatches(metal_matches, matches);
+  }
+
+  void MatchGuided(const double max_error,
+                   const Image& image1,
+                   const Image& image2,
+                   TwoViewGeometry* two_view_geometry) override {
+    THROW_CHECK_NOTNULL(two_view_geometry);
+    ThrowCheckFeatureTypesMatch(image1, image2, /*check_keypoints=*/true);
+
+    two_view_geometry->inlier_matches.clear();
+    if (image1.descriptors->data.rows() == 0 ||
+        image2.descriptors->data.rows() == 0) {
+      return;
+    }
+
+    const bool use_essential_matrix =
+        (two_view_geometry->config == TwoViewGeometry::CALIBRATED ||
+         two_view_geometry->config == TwoViewGeometry::CALIBRATED_RIG) &&
+        two_view_geometry->E.has_value();
+    const bool use_fundamental_matrix =
+        two_view_geometry->config == TwoViewGeometry::UNCALIBRATED &&
+        two_view_geometry->F.has_value();
+    const bool use_homography =
+        (two_view_geometry->config == TwoViewGeometry::PLANAR ||
+         two_view_geometry->config == TwoViewGeometry::PANORAMIC ||
+         two_view_geometry->config == TwoViewGeometry::PLANAR_OR_PANORAMIC) &&
+        two_view_geometry->H.has_value();
+
+    if (!use_essential_matrix && !use_fundamental_matrix && !use_homography) {
+      return;
+    }
+
+    const FeatureKeypoints normalized_keypoints1 =
+        use_essential_matrix
+            ? NormalizeFeatureKeypoints(*image1.camera, *image1.keypoints)
+            : FeatureKeypoints();
+    const FeatureKeypoints normalized_keypoints2 =
+        use_essential_matrix
+            ? NormalizeFeatureKeypoints(*image2.camera, *image2.keypoints)
+            : FeatureKeypoints();
+
+    const FeatureKeypoints& keypoints1 =
+        use_essential_matrix ? normalized_keypoints1 : *image1.keypoints;
+    const FeatureKeypoints& keypoints2 =
+        use_essential_matrix ? normalized_keypoints2 : *image2.keypoints;
+    const std::vector<sift_metal::MatchKeypoint> metal_keypoints1 =
+        ToMetalMatchKeypoints(keypoints1);
+    const std::vector<sift_metal::MatchKeypoint> metal_keypoints2 =
+        ToMetalMatchKeypoints(keypoints2);
+
+    const Eigen::Matrix3f E_or_F =
+        use_essential_matrix
+            ? Eigen::Matrix3f(two_view_geometry->E->cast<float>())
+        : use_fundamental_matrix
+            ? Eigen::Matrix3f(two_view_geometry->F->cast<float>())
+            : Eigen::Matrix3f::Zero();
+    const Eigen::Matrix3f H =
+        use_homography ? Eigen::Matrix3f(two_view_geometry->H->cast<float>())
+                       : Eigen::Matrix3f::Zero();
+    const std::array<float, 9> matrix =
+        ToRowMajorArray(use_homography ? H : E_or_F);
+
+    const float max_residual =
+        use_essential_matrix
+            ? static_cast<float>(ComputeNormalizedGuidedMatchingMaxResidual(
+                  *image1.camera, *image2.camera, max_error))
+            : static_cast<float>(max_error * max_error);
+
+    const sift_metal::MatchOptions match_options{
+        static_cast<float>(options_.sift->max_ratio),
+        static_cast<float>(options_.sift->max_distance),
+        options_.sift->cross_check};
+    const sift_metal::MatchGuidedGeometry guided_geometry =
+        use_homography ? sift_metal::MatchGuidedGeometry::HOMOGRAPHY
+                       : sift_metal::MatchGuidedGeometry::EPIPOLAR;
+    std::vector<sift_metal::MatchResult> metal_matches;
+    if (!matcher_.MatchGuided(image1.descriptors->data.data(),
+                              image1.descriptors->data.rows(),
+                              metal_keypoints1.data(),
+                              image2.descriptors->data.data(),
+                              image2.descriptors->data.rows(),
+                              metal_keypoints2.data(),
+                              match_options,
+                              guided_geometry,
+                              matrix.data(),
+                              max_residual,
+                              &metal_matches)) {
+      LOG(ERROR) << "Metal guided SIFT feature matching failed";
+      return;
+    }
+    ConvertMetalMatches(metal_matches, &two_view_geometry->inlier_matches);
+  }
+
+ private:
+  const FeatureMatchingOptions options_;
+  sift_metal::SiftMetalMatcher matcher_;
+};
+#endif  // COLMAP_METAL_ENABLED
+
 #if defined(COLMAP_GPU_ENABLED) && !defined(COLMAP_METAL_ENABLED)
 // Mutexes for OpenGL version to protect static variables in SiftGPU.
 // CUDA version doesn't need this as it has its own thread safety.
@@ -1651,12 +1826,13 @@ std::unique_ptr<FeatureMatcher> CreateSiftFeatureMatcher(
     return CreateLightGlueONNXFeatureMatcher(options, options.sift->lightglue);
   } else if (options.type == FeatureMatcherType::SIFT_BRUTEFORCE) {
     if (options.use_gpu) {
-#if defined(COLMAP_GPU_ENABLED) && !defined(COLMAP_METAL_ENABLED)
+#if defined(COLMAP_METAL_ENABLED)
+      LOG(INFO) << "Creating SIFT Metal GPU feature matcher";
+      return SiftMetalFeatureMatcher::Create(options);
+#elif defined(COLMAP_GPU_ENABLED)
       LOG(INFO) << "Creating SIFT GPU feature matcher";
       return SiftGPUFeatureMatcher::Create(options);
 #else
-      // Metal builds use CPU matching (FAISS-based).
-      LOG(INFO) << "Creating SIFT CPU feature matcher (GPU matcher unavailable)";
       return SiftCPUFeatureMatcher::Create(options);
 #endif
     } else {

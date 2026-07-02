@@ -61,7 +61,21 @@ make -j$(sysctl -n hw.ncpu)
 
 **Usage** is identical to standard COLMAP — Metal is used automatically for SIFT
 feature extraction and matching when `--FeatureExtraction.use_gpu 1` and
-`--FeatureMatching.use_gpu 1` are enabled.
+`--FeatureMatching.use_gpu 1` are enabled. For sparse datasets intended for
+Gaussian splat training, run the automatic reconstructor with dense MVS disabled:
+
+```bash
+colmap automatic_reconstructor \
+  --workspace_path path/to/workspace \
+  --image_path path/to/images \
+  --dense 0 \
+  --use_gpu 1
+```
+
+On Metal-only builds, `--use_gpu 1` enables Metal SIFT extraction and matching
+while leaving CUDA-only optimization paths on CPU. High-quality automatic
+reconstruction uses the Metal-compatible SIFT extractor instead of CPU-only
+covariant SIFT modifiers.
 
 The Metal SIFT implementation is based on
 [SIFTMetal](https://github.com/lukevanin/SIFTMetal) by Luke Van In, with the

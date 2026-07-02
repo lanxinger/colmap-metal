@@ -37,6 +37,8 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
 namespace colmap {
 namespace {
 
@@ -89,6 +91,53 @@ TEST_P(ParameterizedAutomaticReconstructionTests, Nominal) {
                                  /*num_obs_tolerance=*/0.9,
                                  /*align=*/true));
 }
+
+#if defined(COLMAP_METAL_ENABLED)
+TEST(AutomaticReconstructionTests, HighQualitySparseGpuUsesMetalSift) {
+  SetPRNGSeed(1);
+
+  const auto test_dir = CreateTestDir();
+  const auto workspace_path = test_dir / "workspace";
+  const auto image_path = test_dir / "images";
+  CreateDirIfNotExists(workspace_path);
+  CreateDirIfNotExists(image_path);
+
+  Reconstruction gt_reconstruction;
+  SyntheticDatasetOptions synthetic_dataset_options;
+  synthetic_dataset_options.num_rigs = 3;
+  synthetic_dataset_options.num_cameras_per_rig = 1;
+  synthetic_dataset_options.num_frames_per_rig = 1;
+  synthetic_dataset_options.num_points3D = 100;
+  synthetic_dataset_options.num_points2D_without_point3D = 10;
+  SynthesizeDataset(synthetic_dataset_options, &gt_reconstruction);
+  SynthesizeImages(SyntheticImageOptions(), gt_reconstruction, image_path);
+
+  AutomaticReconstructionController::Options options;
+  options.workspace_path = workspace_path;
+  options.image_path = image_path;
+  options.data_type = AutomaticReconstructionController::DataType::INDIVIDUAL;
+  options.quality = AutomaticReconstructionController::Quality::HIGH;
+  options.dense = false;
+  options.use_gpu = true;
+  options.random_seed = 1;
+  options.mapper = AutomaticReconstructionController::Mapper::INCREMENTAL;
+
+  auto reconstruction_manager = std::make_shared<ReconstructionManager>();
+  testing::internal::CaptureStderr();
+  AutomaticReconstructionController controller(options, reconstruction_manager);
+  controller.Setup();
+  controller.Start();
+  controller.Wait();
+  const std::string output = testing::internal::GetCapturedStderr();
+
+  EXPECT_NE(output.find("Creating SIFT Metal GPU feature extractor"),
+            std::string::npos);
+  EXPECT_NE(output.find("Creating SIFT Metal GPU feature matcher"),
+            std::string::npos);
+  EXPECT_EQ(output.find("Creating Covariant SIFT CPU feature extractor"),
+            std::string::npos);
+}
+#endif  // COLMAP_METAL_ENABLED
 
 // TODO: Add GLOBAL mapper test. Currently excluded because the test produces
 // fewer observations than expected. The global pipeline is tested separately

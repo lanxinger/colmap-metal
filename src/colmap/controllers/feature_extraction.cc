@@ -404,7 +404,14 @@ class FeatureExtractorController : public Thread {
     auto worker_extraction_options = extraction_options_;
     if (extraction_options_.type == FeatureExtractorType::SIFT &&
         (extraction_options_.sift->domain_size_pooling ||
-         extraction_options_.sift->estimate_affine_shape)) {
+         extraction_options_.sift->estimate_affine_shape ||
+         extraction_options_.sift->force_covariant_extractor)) {
+      if (extraction_options_.use_gpu) {
+        LOG(INFO) << "SIFT GPU extraction requested, but affine shape "
+                     "estimation, domain-size pooling, or forced covariant "
+                     "extraction requires covariant CPU SIFT. Falling back to "
+                     "CPU extraction.";
+      }
       worker_extraction_options.use_gpu = false;
     }
 

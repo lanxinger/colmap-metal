@@ -843,6 +843,12 @@ std::unique_ptr<FeatureExtractor> CreateSiftFeatureExtractor(
   if (options.sift->estimate_affine_shape ||
       options.sift->domain_size_pooling ||
       options.sift->force_covariant_extractor) {
+    if (options.use_gpu) {
+      LOG(INFO) << "SIFT GPU extraction requested, but affine shape "
+                   "estimation, domain-size pooling, or forced covariant "
+                   "extraction requires covariant CPU SIFT. Falling back to "
+                   "CPU extraction.";
+    }
     LOG(INFO) << "Creating Covariant SIFT CPU feature extractor";
     return CovariantSiftCPUFeatureExtractor::Create(options);
   } else if (options.use_gpu) {

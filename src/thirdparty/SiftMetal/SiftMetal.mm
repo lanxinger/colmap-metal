@@ -250,10 +250,25 @@ class SiftMetalMatcherImpl {
                  bool reverse_guided,
                  std::vector<SIFTMatcherResult>* results);
 
+  id<MTLBuffer> GetDescriptorBuffer(const uint8_t* descriptors,
+                                    int num_descriptors);
+  void EvictDescriptorBuffers();
+
+  struct DescriptorBufferCacheEntry {
+    const uint8_t* descriptors = nullptr;
+    int num_descriptors = 0;
+    size_t byte_size = 0;
+    uint64_t last_used = 0;
+    id<MTLBuffer> buffer = nil;
+  };
+
   id<MTLDevice> device_;
   id<MTLCommandQueue> commandQueue_;
   id<MTLLibrary> library_;
   id<MTLComputePipelineState> siftMatchBestPipeline_;
+  std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
+  size_t descriptor_buffer_cache_bytes_ = 0;
+  uint64_t descriptor_buffer_cache_tick_ = 0;
 };
 
 bool SiftMetalMatcherImpl::Init() {
@@ -294,6 +309,66 @@ bool SiftMetalMatcherImpl::Init() {
   return siftMatchBestPipeline_ != nil;
 }
 
+id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
+    const uint8_t* descriptors, int num_descriptors) {
+  if (!descriptors || num_descriptors <= 0) {
+    return nil;
+  }
+
+  const size_t descriptor_bytes =
+      static_cast<size_t>(num_descriptors) * SIFT_MATCHER_DESCRIPTOR_DIM;
+  ++descriptor_buffer_cache_tick_;
+  for (auto& entry : descriptor_buffer_cache_) {
+    if (entry.descriptors == descriptors &&
+        entry.num_descriptors == num_descriptors) {
+      entry.last_used = descriptor_buffer_cache_tick_;
+      return entry.buffer;
+    }
+  }
+
+  id<MTLBuffer> buffer =
+      [device_ newBufferWithBytes:descriptors
+                           length:descriptor_bytes
+                          options:MTLResourceStorageModeShared];
+  if (!buffer) {
+    return nil;
+  }
+
+  static constexpr size_t kMaxCachedDescriptorBytes =
+      256ull * 1024ull * 1024ull;
+  if (descriptor_bytes > kMaxCachedDescriptorBytes / 2) {
+    return buffer;
+  }
+
+  descriptor_buffer_cache_.push_back(DescriptorBufferCacheEntry{
+      descriptors,
+      num_descriptors,
+      descriptor_bytes,
+      descriptor_buffer_cache_tick_,
+      buffer});
+  descriptor_buffer_cache_bytes_ += descriptor_bytes;
+  EvictDescriptorBuffers();
+  return buffer;
+}
+
+void SiftMetalMatcherImpl::EvictDescriptorBuffers() {
+  static constexpr size_t kMaxCachedDescriptorBytes =
+      256ull * 1024ull * 1024ull;
+  while (descriptor_buffer_cache_bytes_ > kMaxCachedDescriptorBytes &&
+         !descriptor_buffer_cache_.empty()) {
+    auto lru = descriptor_buffer_cache_.begin();
+    for (auto it = descriptor_buffer_cache_.begin();
+         it != descriptor_buffer_cache_.end();
+         ++it) {
+      if (it->last_used < lru->last_used) {
+        lru = it;
+      }
+    }
+    descriptor_buffer_cache_bytes_ -= lru->byte_size;
+    descriptor_buffer_cache_.erase(lru);
+  }
+}
+
 bool SiftMetalMatcherImpl::RunOneWay(
     const uint8_t* descriptors1, int num_descriptors1,
     const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
@@ -309,18 +384,10 @@ bool SiftMetalMatcherImpl::RunOneWay(
     return true;
   }
 
-  const size_t descriptor_bytes1 =
-      static_cast<size_t>(num_descriptors1) * SIFT_MATCHER_DESCRIPTOR_DIM;
-  const size_t descriptor_bytes2 =
-      static_cast<size_t>(num_descriptors2) * SIFT_MATCHER_DESCRIPTOR_DIM;
   id<MTLBuffer> descriptors1Buffer =
-      [device_ newBufferWithBytes:descriptors1
-                           length:descriptor_bytes1
-                          options:MTLResourceStorageModeShared];
+      GetDescriptorBuffer(descriptors1, num_descriptors1);
   id<MTLBuffer> descriptors2Buffer =
-      [device_ newBufferWithBytes:descriptors2
-                           length:descriptor_bytes2
-                          options:MTLResourceStorageModeShared];
+      GetDescriptorBuffer(descriptors2, num_descriptors2);
   if (!descriptors1Buffer || !descriptors2Buffer) {
     return false;
   }

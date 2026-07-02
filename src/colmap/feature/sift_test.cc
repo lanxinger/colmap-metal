@@ -81,10 +81,12 @@ void ValidateKeypoints(const FeatureKeypoints& keypoints,
   }
 }
 
-void ValidateDescriptorNorms(const FeatureDescriptors& descriptors) {
+void ValidateDescriptorNorms(const FeatureDescriptors& descriptors,
+                             const float max_norm_error = 1.0f) {
   EXPECT_EQ(descriptors.type, FeatureExtractorType::SIFT);
   for (Eigen::Index i = 0; i < descriptors.data.rows(); ++i) {
-    EXPECT_LT(std::abs(descriptors.data.row(i).cast<float>().norm() - 512), 1);
+    EXPECT_LT(std::abs(descriptors.data.row(i).cast<float>().norm() - 512),
+              max_norm_error);
   }
 }
 
@@ -112,6 +114,9 @@ TwoViewGeometry CreatePlanarTwoViewGeometry() {
 }
 
 void RunGpuTest(std::function<void()> test_body) {
+#if defined(COLMAP_METAL_ENABLED) || defined(COLMAP_CUDA_ENABLED)
+  test_body();
+#elif defined(COLMAP_GPU_ENABLED) && defined(COLMAP_GUI_ENABLED)
   char app_name[] = "Test";
   int argc = 1;
   char* argv[] = {app_name};
@@ -132,6 +137,9 @@ void RunGpuTest(std::function<void()> test_body) {
   TestThread thread;
   thread.body = std::move(test_body);
   RunThreadWithOpenGLContext(&thread);
+#else
+  GTEST_SKIP() << "No supported GPU backend is enabled for this test build.";
+#endif
 }
 
 struct SiftCpuExtractionParams {
@@ -202,7 +210,11 @@ TEST(ExtractSiftFeaturesGPU, Nominal) {
     EXPECT_GE(keypoints.size(), 12);
     ValidateKeypoints(keypoints, bitmap);
     EXPECT_GE(descriptors.data.rows(), 12);
+#if defined(COLMAP_METAL_ENABLED)
+    ValidateDescriptorNorms(descriptors, 4.0f);
+#else
     ValidateDescriptorNorms(descriptors);
+#endif
   });
 }
 

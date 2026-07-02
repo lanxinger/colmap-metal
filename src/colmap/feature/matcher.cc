@@ -103,8 +103,8 @@ bool FeatureMatchingOptions::Check() const {
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
 #ifndef COLMAP_GPU_ENABLED
-    LOG(ERROR) << "Cannot use GPU feature matching without CUDA or OpenGL "
-                  "support. Set use_gpu or use_gpu to false.";
+    LOG(ERROR) << "Cannot use GPU feature matching without CUDA, Metal, or "
+                  "OpenGL support. Set use_gpu to false.";
     return false;
 #endif
   }

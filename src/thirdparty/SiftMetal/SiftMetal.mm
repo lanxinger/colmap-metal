@@ -574,6 +574,8 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
     AddMetalLibraryCandidate(
         paths,
         [imageDir stringByAppendingPathComponent:@"../Resources/sift.metallib"]);
+    AddMetalLibraryCandidate(
+        paths, [imageDir stringByAppendingPathComponent:@"../lib/sift.metallib"]);
   }
 
   NSString* configuredPath =

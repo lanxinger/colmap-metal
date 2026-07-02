@@ -30,12 +30,13 @@ Download
   CUDA-enabled wheels are available at https://pypi.org/project/pycolmap-cuda12.
 * To **build from source**, please see https://colmap.github.io/install.html.
 
-Metal SIFT (macOS Apple Silicon)
---------------------------------
+Metal SIFT for sparse reconstruction (macOS Apple Silicon)
+----------------------------------------------------------
 
-This fork adds **Metal-accelerated SIFT feature extraction** for macOS,
-replacing the CUDA/OpenGL GPU dependency. On Apple Silicon Macs, this provides
-GPU-accelerated SIFT without needing CUDA or a Qt/OpenGL context.
+This fork adds **Metal-accelerated SIFT feature extraction and matching** for
+macOS, replacing the CUDA/OpenGL GPU dependency in the sparse reconstruction
+path. On Apple Silicon Macs, this provides GPU-accelerated SIFT without needing
+CUDA or a Qt/OpenGL context.
 
 **Benefits over CPU SIFT on M-series Macs:**
 
@@ -58,8 +59,9 @@ cmake .. \
 make -j$(sysctl -n hw.ncpu)
 ```
 
-**Usage** is identical to standard COLMAP — Metal is used automatically when
-`--FeatureExtraction.use_gpu 1` (the default).
+**Usage** is identical to standard COLMAP — Metal is used automatically for SIFT
+feature extraction and matching when `--FeatureExtraction.use_gpu 1` and
+`--FeatureMatching.use_gpu 1` are enabled.
 
 The Metal SIFT implementation is based on
 [SIFTMetal](https://github.com/lukevanin/SIFTMetal) by Luke Van In, with the
@@ -67,6 +69,10 @@ Swift host code rewritten in Objective-C++ for direct CMake integration. The
 Metal compute shaders handle the full SIFT pipeline: Gaussian scale-space,
 Difference-of-Gaussians, extrema detection, keypoint interpolation, orientation
 assignment, and descriptor extraction.
+
+This targets sparse COLMAP datasets for downstream workflows such as Gaussian
+splat training. Dense MVS/PatchMatch and GPU bundle adjustment are still
+CUDA-backed upstream paths and are not ported to Metal in this fork.
 
 Getting Started
 ---------------

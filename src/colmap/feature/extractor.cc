@@ -137,8 +137,8 @@ bool FeatureExtractionOptions::Check() const {
   if (use_gpu) {
     CHECK_OPTION_GT(CSVToVector<int>(gpu_index).size(), 0);
 #if !defined(COLMAP_GPU_ENABLED) && !defined(COLMAP_CUDA_ENABLED)
-    LOG(ERROR) << "Cannot use GPU feature extraction without CUDA or OpenGL "
-                  "support. Consider setting use_gpu to false.";
+    LOG(ERROR) << "Cannot use GPU feature extraction without CUDA, Metal, or "
+                  "OpenGL support. Consider setting use_gpu to false.";
     return false;
 #endif
   }

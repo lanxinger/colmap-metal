@@ -77,6 +77,9 @@ target_link_libraries(colmap_sift_metal PUBLIC
     "-framework Foundation"
 )
 
-# Install metallib alongside binaries.
+# Install metallib where the runtime loader can find it in both command-line
+# and library/framework layouts.
+install(FILES ${METALLIB_OUTPUT}
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ${METALLIB_OUTPUT}
         DESTINATION ${CMAKE_INSTALL_LIBDIR})

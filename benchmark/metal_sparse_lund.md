@@ -19,6 +19,16 @@ Dataset: `/Users/markus/GIT/OpenSfM/data/lund/images`
 
 ## Results
 
+The same automatic sparse workflow can be reproduced with:
+
+```bash
+python3 scripts/benchmark_sift_metal.py \
+  /Users/markus/GIT/OpenSfM/data/lund/images \
+  --automatic \
+  --workspace /private/tmp/colmap-metal-benchmark-lund \
+  --colmap build-metal/src/colmap/exe/colmap
+```
+
 | Metric | Value |
 |---|---:|
 | Total wall time | 7.36 s |

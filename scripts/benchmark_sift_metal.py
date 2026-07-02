@@ -31,8 +31,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--colmap",
         type=Path,
-        default=Path("build/src/colmap/exe/colmap"),
+        default=None,
         help="COLMAP executable to benchmark",
+    )
+    parser.add_argument(
+        "--automatic",
+        action="store_true",
+        help="Benchmark automatic_reconstructor --dense 0 --use_gpu 1",
+    )
+    parser.add_argument(
+        "--automatic-guided-matching",
+        choices=("default", "on", "off"),
+        default="default",
+        help=(
+            "Guided matching mode for --automatic. The default leaves COLMAP's "
+            "automatic_reconstructor preset unchanged."
+        ),
     )
     parser.add_argument(
         "--guided",
@@ -84,6 +98,13 @@ def run_command(label: str, command: list[str], cwd: Path) -> dict[str, object]:
     }
 
 
+def default_colmap_path(repo_root: Path) -> Path:
+    build_metal_colmap = repo_root / "build-metal/src/colmap/exe/colmap"
+    if build_metal_colmap.exists():
+        return build_metal_colmap
+    return repo_root / "build/src/colmap/exe/colmap"
+
+
 def backup_database(source: Path, destination: Path) -> None:
     if destination.exists():
         destination.unlink()
@@ -127,6 +148,23 @@ def parse_model_analyzer(output: str) -> dict[str, str]:
     return metrics
 
 
+def parse_stage_minutes(output: str) -> dict[str, float]:
+    stages = {}
+    current_stage = None
+    for line in output.splitlines():
+        if "automatic_reconstruction.cc" in line and "=== " in line:
+            stage_match = re.search(r"=== (.*?) ===", line)
+            if stage_match:
+                current_stage = stage_match.group(1).lower().replace(" ", "_")
+            continue
+        if current_stage and "timer.cc" in line and "Elapsed time:" in line:
+            time_match = re.search(r"Elapsed time: ([0-9.]+) \[minutes\]", line)
+            if time_match:
+                stages[f"{current_stage}_minutes"] = float(time_match.group(1))
+                current_stage = None
+    return stages
+
+
 def run_mapper_and_analyzer(
     colmap: Path, image_path: Path, workspace: Path, cwd: Path
 ) -> dict[str, object]:
@@ -166,10 +204,76 @@ def run_mapper_and_analyzer(
     }
 
 
+def run_model_analyzer_if_available(
+    colmap: Path, model_path: Path, cwd: Path
+) -> dict[str, object]:
+    if not model_path.exists():
+        return {
+            "model_path": str(model_path),
+            "model_analyzer": {},
+        }
+    analyzer = run_command(
+        f"model_analyzer {model_path.parent.parent.name}",
+        [str(colmap), "model_analyzer", "--path", str(model_path)],
+        cwd,
+    )
+    return {
+        "model_path": str(model_path),
+        "model_analyzer_seconds": analyzer["seconds"],
+        "model_analyzer": parse_model_analyzer(str(analyzer["output"])),
+    }
+
+
+def run_automatic_benchmark(
+    args: argparse.Namespace, colmap: Path, image_path: Path, repo_root: Path
+) -> dict[str, object]:
+    workspace = args.workspace
+    if workspace.exists() and not args.keep_workspace:
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        str(colmap),
+        "automatic_reconstructor",
+        "--workspace_path",
+        str(workspace),
+        "--image_path",
+        str(image_path),
+        "--dense",
+        "0",
+        "--use_gpu",
+        "1",
+    ]
+    if args.automatic_guided_matching != "default":
+        command.extend(
+            [
+                "--guided_matching",
+                "1" if args.automatic_guided_matching == "on" else "0",
+            ]
+        )
+
+    automatic = run_command(
+        "automatic_reconstructor sparse metal", command, repo_root
+    )
+    result: dict[str, object] = {
+        "mode": "automatic_reconstructor",
+        "image_path": str(image_path),
+        "workspace": str(workspace),
+        "automatic_guided_matching": args.automatic_guided_matching,
+        "total_seconds": automatic["seconds"],
+        "stage_minutes": parse_stage_minutes(str(automatic["output"])),
+        "db_stats": db_stats(workspace / "database.db"),
+    }
+    result.update(
+        run_model_analyzer_if_available(colmap, workspace / "sparse/0", repo_root)
+    )
+    return result
+
+
 def main() -> int:
     args = parse_args()
     repo_root = Path.cwd()
-    colmap = args.colmap
+    colmap = args.colmap or default_colmap_path(repo_root)
     if not colmap.is_absolute():
         colmap = repo_root / colmap
     image_path = args.image_path
@@ -180,6 +284,15 @@ def main() -> int:
         raise FileNotFoundError(f"COLMAP executable not found: {colmap}")
     if not image_path.exists():
         raise FileNotFoundError(f"Image path not found: {image_path}")
+
+    if args.automatic:
+        result = run_automatic_benchmark(args, colmap, image_path, repo_root)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        print(
+            f"automatic sparse runtime: {float(result['total_seconds']):.2f}s",
+            file=sys.stderr,
+        )
+        return 0
 
     if args.workspace.exists() and not args.keep_workspace:
         shutil.rmtree(args.workspace)

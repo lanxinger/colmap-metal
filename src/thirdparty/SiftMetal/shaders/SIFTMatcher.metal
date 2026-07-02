@@ -84,39 +84,62 @@ kernel void siftMatchBest(
       params.distanceType == SIFT_MATCHER_DISTANCE_L2 ? FLT_MAX : 0.0f;
 
   const uint desc1Offset = gid * SIFT_MATCHER_DESCRIPTOR_DIM;
-  for (uint idx2 = 0; idx2 < params.numDescriptors2; ++idx2) {
-    int score = int(kSqSiftDescriptorNorm);
-    if (!RejectByGuidedGeometry(params, keypoints1, keypoints2, gid, idx2)) {
+
+  if (params.distanceType == SIFT_MATCHER_DISTANCE_DOT_PRODUCT &&
+      params.guidedGeometry == SIFT_MATCHER_GUIDED_NONE) {
+    for (uint idx2 = 0; idx2 < params.numDescriptors2; ++idx2) {
       const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
-      score = 0;
+      int score = 0;
       for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
         const int v1 = int(descriptors1[desc1Offset + k]);
         const int v2 = int(descriptors2[desc2Offset + k]);
-        if (params.distanceType == SIFT_MATCHER_DISTANCE_L2) {
-          const int diff = v1 - v2;
-          score += diff * diff;
-        } else {
-          score += v1 * v2;
-        }
+        score += v1 * v2;
       }
-    }
 
-    const float scoref = float(score);
-    if (params.distanceType == SIFT_MATCHER_DISTANCE_L2) {
-      if (scoref < bestScore) {
-        bestIdx = int(idx2);
-        secondBestScore = bestScore;
-        bestScore = scoref;
-      } else if (scoref < secondBestScore) {
-        secondBestScore = scoref;
-      }
-    } else {
+      const float scoref = float(score);
       if (scoref > bestScore) {
         bestIdx = int(idx2);
         secondBestScore = bestScore;
         bestScore = scoref;
       } else if (scoref > secondBestScore) {
         secondBestScore = scoref;
+      }
+    }
+  } else {
+    for (uint idx2 = 0; idx2 < params.numDescriptors2; ++idx2) {
+      int score = int(kSqSiftDescriptorNorm);
+      if (!RejectByGuidedGeometry(params, keypoints1, keypoints2, gid, idx2)) {
+        const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
+        score = 0;
+        for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
+          const int v1 = int(descriptors1[desc1Offset + k]);
+          const int v2 = int(descriptors2[desc2Offset + k]);
+          if (params.distanceType == SIFT_MATCHER_DISTANCE_L2) {
+            const int diff = v1 - v2;
+            score += diff * diff;
+          } else {
+            score += v1 * v2;
+          }
+        }
+      }
+
+      const float scoref = float(score);
+      if (params.distanceType == SIFT_MATCHER_DISTANCE_L2) {
+        if (scoref < bestScore) {
+          bestIdx = int(idx2);
+          secondBestScore = bestScore;
+          bestScore = scoref;
+        } else if (scoref < secondBestScore) {
+          secondBestScore = scoref;
+        }
+      } else {
+        if (scoref > bestScore) {
+          bestIdx = int(idx2);
+          secondBestScore = bestScore;
+          bestScore = scoref;
+        } else if (scoref > secondBestScore) {
+          secondBestScore = scoref;
+        }
       }
     }
   }
@@ -126,6 +149,110 @@ kernel void siftMatchBest(
     accepted = bestScore <= params.maxL2Distance &&
                bestScore < params.maxRatioSquared * secondBestScore;
   } else if (accepted) {
+    const float bestDist =
+        acos(min(bestScore * kInvSqSiftDescriptorNorm, 1.0f));
+    const float secondBestDist =
+        acos(min(secondBestScore * kInvSqSiftDescriptorNorm, 1.0f));
+    accepted = bestDist <= params.maxDistance &&
+               bestDist < params.maxRatio * secondBestDist;
+  }
+
+  results[gid].index = accepted ? bestIdx : -1;
+  results[gid].bestScore = bestScore;
+  results[gid].secondBestScore = secondBestScore;
+}
+
+kernel void siftMatchBestDotParallel(
+    const device uchar* descriptors1 [[buffer(0)]],
+    const device uchar* descriptors2 [[buffer(1)]],
+    const device SIFTMatcherKeypoint* keypoints1 [[buffer(2)]],
+    const device SIFTMatcherKeypoint* keypoints2 [[buffer(3)]],
+    constant SIFTMatcherParameters& params [[buffer(4)]],
+    device SIFTMatcherResult* results [[buffer(5)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint threadsPerThreadgroup [[threads_per_threadgroup]]) {
+  (void)keypoints1;
+  (void)keypoints2;
+
+  if (gid >= params.numDescriptors1) {
+    return;
+  }
+
+  threadgroup float bestScores[SIFT_MATCHER_DOT_THREADS];
+  threadgroup float secondBestScores[SIFT_MATCHER_DOT_THREADS];
+  threadgroup int bestIndices[SIFT_MATCHER_DOT_THREADS];
+  threadgroup int secondBestIndices[SIFT_MATCHER_DOT_THREADS];
+
+  float localBestScore = 0.0f;
+  float localSecondBestScore = 0.0f;
+  int localBestIdx = -1;
+  int localSecondBestIdx = -1;
+
+  const uint desc1Offset = gid * SIFT_MATCHER_DESCRIPTOR_DIM;
+  for (uint idx2 = tid; idx2 < params.numDescriptors2;
+       idx2 += threadsPerThreadgroup) {
+    const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
+    int score = 0;
+    for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
+      score += int(descriptors1[desc1Offset + k]) *
+               int(descriptors2[desc2Offset + k]);
+    }
+
+    const float scoref = float(score);
+    if (scoref > localBestScore) {
+      localSecondBestIdx = localBestIdx;
+      localSecondBestScore = localBestScore;
+      localBestIdx = int(idx2);
+      localBestScore = scoref;
+    } else if (scoref > localSecondBestScore) {
+      localSecondBestIdx = int(idx2);
+      localSecondBestScore = scoref;
+    }
+  }
+
+  bestScores[tid] = localBestScore;
+  secondBestScores[tid] = localSecondBestScore;
+  bestIndices[tid] = localBestIdx;
+  secondBestIndices[tid] = localSecondBestIdx;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (tid != 0) {
+    return;
+  }
+
+  int bestIdx = -1;
+  int secondBestIdx = -1;
+  float bestScore = 0.0f;
+  float secondBestScore = 0.0f;
+
+  for (uint i = 0; i < threadsPerThreadgroup; ++i) {
+    const float candidates[2] = {bestScores[i], secondBestScores[i]};
+    const int candidateIndices[2] = {bestIndices[i], secondBestIndices[i]};
+    for (uint candidate = 0; candidate < 2; ++candidate) {
+      const float score = candidates[candidate];
+      const int index = candidateIndices[candidate];
+      if (index < 0) {
+        continue;
+      }
+      if (score > bestScore ||
+          (score == bestScore && (bestIdx < 0 || index < bestIdx))) {
+        secondBestIdx = bestIdx;
+        secondBestScore = bestScore;
+        bestIdx = index;
+        bestScore = score;
+      } else if (index != bestIdx &&
+                 (score > secondBestScore ||
+                  (score == secondBestScore &&
+                   (secondBestIdx < 0 || index < secondBestIdx)))) {
+        secondBestIdx = index;
+        secondBestScore = score;
+      }
+    }
+  }
+
+  bool accepted = bestIdx >= 0;
+  if (accepted) {
     const float bestDist =
         acos(min(bestScore * kInvSqSiftDescriptorNorm, 1.0f));
     const float secondBestDist =

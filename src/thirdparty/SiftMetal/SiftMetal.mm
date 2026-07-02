@@ -266,6 +266,7 @@ class SiftMetalMatcherImpl {
   id<MTLCommandQueue> commandQueue_;
   id<MTLLibrary> library_;
   id<MTLComputePipelineState> siftMatchBestPipeline_;
+  id<MTLComputePipelineState> siftMatchBestDotParallelPipeline_;
   std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
   size_t descriptor_buffer_cache_bytes_ = 0;
   uint64_t descriptor_buffer_cache_tick_ = 0;
@@ -306,7 +307,10 @@ bool SiftMetalMatcherImpl::Init() {
   }
 
   siftMatchBestPipeline_ = MakePipeline(device_, library_, "siftMatchBest");
-  return siftMatchBestPipeline_ != nil;
+  siftMatchBestDotParallelPipeline_ =
+      MakePipeline(device_, library_, "siftMatchBestDotParallel");
+  return siftMatchBestPipeline_ != nil &&
+         siftMatchBestDotParallelPipeline_ != nil;
 }
 
 id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
@@ -376,7 +380,12 @@ bool SiftMetalMatcherImpl::RunOneWay(
     const MatchOptions& options, MatchGuidedGeometry guided_geometry,
     const float matrix[9], float max_residual, bool reverse_guided,
     std::vector<SIFTMatcherResult>* results) {
-  if (!siftMatchBestPipeline_) {
+  const bool use_parallel_dot_pipeline =
+      guided_geometry == MatchGuidedGeometry::NONE;
+  id<MTLComputePipelineState> pipeline =
+      use_parallel_dot_pipeline ? siftMatchBestDotParallelPipeline_
+                                : siftMatchBestPipeline_;
+  if (!pipeline) {
     return false;
   }
   if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {
@@ -457,18 +466,24 @@ bool SiftMetalMatcherImpl::RunOneWay(
   id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
   id<MTLComputeCommandEncoder> encoder =
       [commandBuffer computeCommandEncoder];
-  [encoder setComputePipelineState:siftMatchBestPipeline_];
+  [encoder setComputePipelineState:pipeline];
   [encoder setBuffer:descriptors1Buffer offset:0 atIndex:0];
   [encoder setBuffer:descriptors2Buffer offset:0 atIndex:1];
   [encoder setBuffer:keypoints1Buffer offset:0 atIndex:2];
   [encoder setBuffer:keypoints2Buffer offset:0 atIndex:3];
   [encoder setBuffer:paramsBuffer offset:0 atIndex:4];
   [encoder setBuffer:resultsBuffer offset:0 atIndex:5];
-  const NSUInteger threadsPerThreadgroup =
-      std::min<NSUInteger>(siftMatchBestPipeline_.maxTotalThreadsPerThreadgroup,
-                           256);
-  [encoder dispatchThreads:MTLSizeMake(num_descriptors1, 1, 1)
-      threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
+  if (use_parallel_dot_pipeline) {
+    const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
+        pipeline.maxTotalThreadsPerThreadgroup, SIFT_MATCHER_DOT_THREADS);
+    [encoder dispatchThreadgroups:MTLSizeMake(num_descriptors1, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
+  } else {
+    const NSUInteger threadsPerThreadgroup =
+        std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup, 256);
+    [encoder dispatchThreads:MTLSizeMake(num_descriptors1, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
+  }
   [encoder endEncoding];
   [commandBuffer commit];
   [commandBuffer waitUntilCompleted];

@@ -45,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip mapper and model_analyzer steps",
     )
     parser.add_argument(
+        "--skip-geometric-verification",
+        action="store_true",
+        help="Pass FeatureMatching.skip_geometric_verification to matching runs",
+    )
+    parser.add_argument(
         "--keep-workspace",
         action="store_true",
         help="Keep any existing workspace contents instead of recreating it",
@@ -200,6 +205,9 @@ def main() -> int:
     backup_database(before / "database.db", after / "database.db")
 
     guided_value = "1" if args.guided else "0"
+    skip_geometric_verification_value = (
+        "1" if args.skip_geometric_verification else "0"
+    )
     before_matching = run_command(
         "exhaustive_matcher cpu",
         [
@@ -211,6 +219,8 @@ def main() -> int:
             "0",
             "--FeatureMatching.guided_matching",
             guided_value,
+            "--FeatureMatching.skip_geometric_verification",
+            skip_geometric_verification_value,
         ],
         repo_root,
     )
@@ -225,6 +235,8 @@ def main() -> int:
             "1",
             "--FeatureMatching.guided_matching",
             guided_value,
+            "--FeatureMatching.skip_geometric_verification",
+            skip_geometric_verification_value,
         ],
         repo_root,
     )
@@ -233,6 +245,7 @@ def main() -> int:
         "image_path": str(image_path),
         "workspace": str(args.workspace),
         "guided_matching": args.guided,
+        "skip_geometric_verification": args.skip_geometric_verification,
         "extraction_seconds": extraction["seconds"],
         "before_cpu": {
             "matching_seconds": before_matching["seconds"],

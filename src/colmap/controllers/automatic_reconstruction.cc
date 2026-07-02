@@ -37,6 +37,7 @@
 #include "colmap/controllers/option_manager.h"
 #include "colmap/controllers/undistorters.h"
 #include "colmap/estimators/view_graph_calibration.h"
+#include "colmap/feature/sift.h"
 #if defined(COLMAP_MVS_ENABLED)
 #include "colmap/mvs/advancing_front_meshing.h"
 #include "colmap/mvs/delaunay_meshing.h"
@@ -50,6 +51,27 @@
 #include "colmap/util/misc.h"
 
 namespace colmap {
+namespace {
+
+bool UseCudaGpuBackend(const bool use_gpu) {
+#if defined(COLMAP_CUDA_ENABLED)
+  return use_gpu;
+#else
+  return false;
+#endif
+}
+
+void UseGpuCompatibleSiftExtractionOptions(FeatureExtractionOptions* options) {
+  if (!options->use_gpu || options->type != FeatureExtractorType::SIFT) {
+    return;
+  }
+
+  options->sift->estimate_affine_shape = false;
+  options->sift->domain_size_pooling = false;
+  options->sift->force_covariant_extractor = false;
+}
+
+}  // namespace
 
 AutomaticReconstructionController::AutomaticReconstructionController(
     const Options& options,
@@ -154,11 +176,15 @@ AutomaticReconstructionController::AutomaticReconstructionController(
 
   option_manager_.feature_extraction->use_gpu = options_.use_gpu;
   option_manager_.feature_matching->use_gpu = options_.use_gpu;
-  option_manager_.mapper->ba_use_gpu = options_.use_gpu;
+  UseGpuCompatibleSiftExtractionOptions(option_manager_.feature_extraction.get());
+  const bool use_gpu_bundle_adjustment =
+      UseCudaGpuBackend(options_.use_gpu);
+  option_manager_.mapper->ba_use_gpu = use_gpu_bundle_adjustment;
   option_manager_.mapper->ba_local_backend = options_.ba_backend;
   option_manager_.mapper->ba_global_backend = options_.ba_backend;
   if (option_manager_.bundle_adjustment->ceres) {
-    option_manager_.bundle_adjustment->ceres->use_gpu = options_.use_gpu;
+    option_manager_.bundle_adjustment->ceres->use_gpu =
+        use_gpu_bundle_adjustment;
   }
 
   option_manager_.feature_extraction->gpu_index = options_.gpu_index;
@@ -342,6 +368,18 @@ void AutomaticReconstructionController::RunSparseMapper() {
       global_options.image_path = *option_manager_.image_path;
       global_options.num_threads = options_.num_threads;
       global_options.random_seed = options_.random_seed;
+      const bool use_gpu_global_optimization =
+          UseCudaGpuBackend(options_.use_gpu);
+      global_options.mapper.global_positioning.use_gpu =
+          use_gpu_global_optimization;
+      global_options.mapper.global_positioning.gpu_index =
+          options_.gpu_index;
+      if (global_options.mapper.bundle_adjustment.ceres) {
+        global_options.mapper.bundle_adjustment.ceres->use_gpu =
+            use_gpu_global_optimization;
+        global_options.mapper.bundle_adjustment.ceres->gpu_index =
+            options_.gpu_index;
+      }
       mapper = std::make_unique<GlobalPipeline>(std::move(global_options),
                                                 std::move(database),
                                                 reconstruction_manager_);

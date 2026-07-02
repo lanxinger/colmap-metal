@@ -94,7 +94,7 @@ class AutomaticReconstructionController : public Thread {
     // Whether to perform sparse mapping.
     bool sparse = true;
 
-// Whether to perform dense mapping.
+    // Whether to perform dense mapping.
 #if defined(COLMAP_CUDA_ENABLED) && defined(COLMAP_MVS_ENABLED)
     bool dense = true;
 #else
@@ -117,7 +117,7 @@ class AutomaticReconstructionController : public Thread {
     int random_seed = -1;
 
     // Whether to use the GPU in feature extraction, feature matching, and
-    // bundle adjustment.
+    // CUDA-backed bundle adjustment/positioning when available.
     bool use_gpu = true;
 
     // Index of the GPU used for GPU stages. For multi-GPU computation in

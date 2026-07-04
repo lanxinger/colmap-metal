@@ -67,6 +67,7 @@ struct Octave {
   id<MTLTexture> gaussianTextures;   // 2DArray [num_scales+3]
   id<MTLTexture> differenceTextures; // 2DArray [num_scales+2]
   id<MTLTexture> gradientTextures;   // 2DArray, rg32Float
+  id<MTLBuffer> downscaleParamsBuffer;
 
   // Buffers for extrema detection
   id<MTLBuffer> extremaOutputBuffer;
@@ -99,7 +100,8 @@ struct Octave {
 
 static bool OctaveResourcesReady(const Octave& oct) {
   if (!oct.gaussianTextures || !oct.differenceTextures ||
-      !oct.gradientTextures || !oct.convWorkTexture ||
+      !oct.gradientTextures || !oct.downscaleParamsBuffer ||
+      !oct.convWorkTexture ||
       !oct.extremaOutputBuffer || !oct.extremaIndexBuffer ||
       !oct.extremaParamsBuffer || !oct.interpolateInputBuffer ||
       !oct.interpolateOutputBuffer || !oct.interpolateParamsBuffer ||
@@ -832,6 +834,13 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
   oct.gradientTextures = MakeTexture2DArray(
       device_, w, h, numGaussians, MTLPixelFormatRG32Float,
       MTLStorageModePrivate);
+  NearestNeighborScaleParameters downscale_params = {};
+  downscale_params.inputSlice = static_cast<int32_t>(num_scales);
+  downscale_params.outputSlice = 0;
+  oct.downscaleParamsBuffer =
+      [device_ newBufferWithBytes:&downscale_params
+                           length:sizeof(NearestNeighborScaleParameters)
+                          options:MTLResourceStorageModeShared];
 
   // Convolution work texture (single-slice private).
   oct.convWorkTexture = MakeTexture2DArray(
@@ -1164,18 +1173,11 @@ void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
     }
   } else {
     // Nearest-neighbor downscale from previous octave's gaussian[num_scales].
-    id<MTLBuffer> paramsBuf =
-        [device_ newBufferWithLength:sizeof(NearestNeighborScaleParameters)
-                             options:MTLResourceStorageModeShared];
-    auto* p = static_cast<NearestNeighborScaleParameters*>(paramsBuf.contents);
-    p->inputSlice = oct.num_scales;
-    p->outputSlice = 0;
-
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:nearestNeighborDownScalePipeline_];
     [enc setTexture:oct.gaussianTextures atIndex:0];
     [enc setTexture:inputTexture atIndex:1];
-    [enc setBuffer:paramsBuf offset:0 atIndex:0];
+    [enc setBuffer:oct.downscaleParamsBuffer offset:0 atIndex:0];
     MTLSize tg = {16, 16, 1};
     MTLSize grid = {(NSUInteger)(w + 15) / 16,
                     (NSUInteger)(h + 15) / 16, 1};

@@ -57,8 +57,10 @@ void getPrincipalOrientations(
         if ((h0 > threshold) && (h0 > hm) && (h0 > hp)) {
             float offset = interpolatePeak(hm, h0, hp);
             float orientation = orientationFromBin((float)i + offset);
-            orientations[orientationsCount] = orientation;
-            orientationsCount += 1;
+            if (isfinite(orientation) && orientationsCount < bins) {
+                orientations[orientationsCount] = orientation;
+                orientationsCount += 1;
+            }
         }
     }
 }

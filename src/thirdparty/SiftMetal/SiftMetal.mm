@@ -1448,10 +1448,15 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
     int kpIdx = static_cast<int>(res.keypoint);
     int count = static_cast<int>(res.count);
     int maxOrient = options_.upright ? 1 : options_.max_num_orientations;
-    count = std::min(count, maxOrient);
+    count = std::min({std::max(count, 0),
+                      maxOrient,
+                      SIFT_ORIENTATION_HISTOGRAM_BINS});
     float* oris = reinterpret_cast<float*>(&res.orientations);
     for (int i = 0; i < count; ++i) {
       float theta = options_.upright ? 0.0f : oris[i];
+      if (!std::isfinite(theta)) {
+        continue;
+      }
       oriented.emplace_back(kpIdx, theta);
     }
   }

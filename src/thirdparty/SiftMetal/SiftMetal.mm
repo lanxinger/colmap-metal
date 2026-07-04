@@ -600,7 +600,7 @@ bool SiftMetalMatcherImpl::Match(
   matches->reserve(num_descriptors1);
   for (int i1 = 0; i1 < num_descriptors1; ++i1) {
     const int i2 = matches_1to2[i1].index;
-    if (i2 < 0) {
+    if (i2 < 0 || i2 >= num_descriptors2) {
       continue;
     }
     if (options.cross_check &&

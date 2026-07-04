@@ -32,9 +32,9 @@
 
 namespace sift_metal {
 
-static constexpr int kMaxExtrema = 4096;
-static constexpr int kMaxKeypoints = 4096;
-static constexpr int kMaxDescriptors = 8192;
+static constexpr int kMinExtremaCapacity = 4096;
+static constexpr int kMinKeypointCapacity = 4096;
+static constexpr int kMinDescriptorCapacity = 8192;
 
 // ---------------------------------------------------------------------------
 // Helper: compute 1D Gaussian kernel weights.
@@ -165,6 +165,9 @@ class SiftMetalExtractorImpl {
 
   // Options
   Options options_;
+  int extrema_capacity_ = kMinExtremaCapacity;
+  int keypoint_capacity_ = kMinKeypointCapacity;
+  int descriptor_capacity_ = kMinDescriptorCapacity;
   float sigma_min_ = 0.8f;
   float delta_min_ = 0.5f;
   float sigma_input_ = 0.5f;
@@ -603,6 +606,18 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   options_ = opts;
+  const int max_num_features =
+      options_.max_num_features > 0 ? options_.max_num_features
+                                    : kMinDescriptorCapacity;
+  const int max_num_orientations =
+      options_.upright ? 1 : std::max(1, options_.max_num_orientations);
+  const int requested_descriptors = max_num_features * max_num_orientations;
+  extrema_capacity_ =
+      std::max(kMinExtremaCapacity, requested_descriptors);
+  keypoint_capacity_ =
+      std::max(kMinKeypointCapacity, max_num_features);
+  descriptor_capacity_ =
+      std::max(kMinDescriptorCapacity, requested_descriptors);
 
   // Get the default Metal device.
   device_ = MTLCreateSystemDefaultDevice();
@@ -812,13 +827,14 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   // Extrema buffers
   oct.extremaOutputBuffer =
-      [device_ newBufferWithLength:kMaxExtrema * sizeof(SIFTExtremaResult)
+      [device_ newBufferWithLength:extrema_capacity_ *
+                                    sizeof(SIFTExtremaResult)
                            options:MTLResourceStorageModeShared];
   oct.extremaIndexBuffer =
       [device_ newBufferWithLength:sizeof(uint32_t)
                            options:MTLResourceStorageModeShared];
   SIFTExtremaParameters extrema_params = {};
-  extrema_params.capacity = static_cast<uint32_t>(kMaxExtrema);
+  extrema_params.capacity = static_cast<uint32_t>(extrema_capacity_);
   oct.extremaParamsBuffer =
       [device_ newBufferWithBytes:&extrema_params
                            length:sizeof(SIFTExtremaParameters)
@@ -826,11 +842,11 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   // Interpolation buffers
   oct.interpolateInputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
+      [device_ newBufferWithLength:keypoint_capacity_ *
                                        sizeof(SIFTInterpolateInputKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.interpolateOutputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
+      [device_ newBufferWithLength:keypoint_capacity_ *
                                        sizeof(SIFTInterpolateOutputKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.interpolateParamsBuffer =
@@ -839,11 +855,11 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   // Orientation buffers
   oct.orientationInputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
+      [device_ newBufferWithLength:keypoint_capacity_ *
                                        sizeof(SIFTOrientationKeypoint)
                            options:MTLResourceStorageModeShared];
   oct.orientationOutputBuffer =
-      [device_ newBufferWithLength:kMaxKeypoints *
+      [device_ newBufferWithLength:keypoint_capacity_ *
                                        sizeof(SIFTOrientationResult)
                            options:MTLResourceStorageModeShared];
   oct.orientationParamsBuffer =
@@ -852,10 +868,11 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   // Descriptor buffers
   oct.descriptorInputBuffer =
-      [device_ newBufferWithLength:kMaxDescriptors * sizeof(SIFTDescriptorInput)
+      [device_ newBufferWithLength:descriptor_capacity_ *
+                                    sizeof(SIFTDescriptorInput)
                            options:MTLResourceStorageModeShared];
   oct.descriptorOutputBuffer =
-      [device_ newBufferWithLength:kMaxDescriptors *
+      [device_ newBufferWithLength:descriptor_capacity_ *
                                        sizeof(SIFTDescriptorResult)
                            options:MTLResourceStorageModeShared];
   oct.descriptorParamsBuffer =
@@ -936,7 +953,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
   for (auto& oct : octaves_) {
     int extremaCount = ReadExtremaCount(oct);
     if (extremaCount <= 0) continue;
-    extremaCount = std::min(extremaCount, kMaxExtrema);
+    extremaCount = std::min(extremaCount, extrema_capacity_);
 
     if (!InterpolateKeypoints(oct, extremaCount)) {
       return false;
@@ -1227,7 +1244,7 @@ int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
                                                     int extremaCount) {
-  int count = std::min(extremaCount, kMaxKeypoints);
+  int count = std::min(extremaCount, keypoint_capacity_);
 
   // Copy extrema to interpolation input buffer.
   auto* extrema =
@@ -1296,7 +1313,8 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
 
   int validCount = 0;
   std::vector<int> validIndices;
-  for (int k = 0; k < (int)keypoints.size() && validCount < kMaxKeypoints; ++k) {
+  const int num_keypoints = static_cast<int>(keypoints.size());
+  for (int k = 0; k < num_keypoints && validCount < keypoint_capacity_; ++k) {
     const auto& kp = keypoints[k];
     float x = kp.x / delta;
     float y = kp.y / delta;
@@ -1374,7 +1392,7 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
     Octave& oct, const std::vector<Keypoint>& keypoints,
     const std::vector<std::pair<int, float>>& oriented,
     ExtractResult* result) {
-  int count = std::min((int)oriented.size(), kMaxDescriptors);
+  int count = std::min((int)oriented.size(), descriptor_capacity_);
   if (count == 0) return true;
 
   auto* params =

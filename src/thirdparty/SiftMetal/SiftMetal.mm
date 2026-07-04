@@ -573,6 +573,13 @@ bool SiftMetalMatcherImpl::Match(
        (!matrix || !std::isfinite(max_residual) || max_residual < 0.0f))) {
     return false;
   }
+  if (guided_geometry != MatchGuidedGeometry::NONE) {
+    for (int i = 0; i < 9; ++i) {
+      if (!std::isfinite(matrix[i])) {
+        return false;
+      }
+    }
+  }
 
   matches->clear();
   if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {

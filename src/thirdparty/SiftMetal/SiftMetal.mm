@@ -59,44 +59,44 @@ static std::vector<float> GaussianWeights(float sigma) {
 // Octave: manages textures and pipelines for one octave of the pyramid.
 // ---------------------------------------------------------------------------
 struct Octave {
-  int o;                 // octave index
-  float delta;           // sampling distance
-  int width, height;     // dimensions at this octave
-  int num_scales;        // scales per octave (typically 3)
+  int o = 0;                 // octave index
+  float delta = 0.0f;        // sampling distance
+  int width = 0, height = 0; // dimensions at this octave
+  int num_scales = 0;        // scales per octave (typically 3)
   std::vector<float> sigmas;  // sigma values for each gaussian
 
-  id<MTLTexture> gaussianTextures;   // 2DArray [num_scales+3]
-  id<MTLTexture> differenceTextures; // 2DArray [num_scales+2]
-  id<MTLTexture> gradientTextures;   // 2DArray, rg32Float
-  id<MTLBuffer> downscaleParamsBuffer;
+  id<MTLTexture> gaussianTextures = nil;   // 2DArray [num_scales+3]
+  id<MTLTexture> differenceTextures = nil; // 2DArray [num_scales+2]
+  id<MTLTexture> gradientTextures = nil;   // 2DArray, rg32Float
+  id<MTLBuffer> downscaleParamsBuffer = nil;
 
   // Buffers for extrema detection
-  id<MTLBuffer> extremaOutputBuffer;
-  id<MTLBuffer> extremaIndexBuffer;
-  id<MTLBuffer> extremaParamsBuffer;
+  id<MTLBuffer> extremaOutputBuffer = nil;
+  id<MTLBuffer> extremaIndexBuffer = nil;
+  id<MTLBuffer> extremaParamsBuffer = nil;
 
   // Buffers for interpolation
-  id<MTLBuffer> interpolateInputBuffer;
-  id<MTLBuffer> interpolateOutputBuffer;
-  id<MTLBuffer> interpolateParamsBuffer;
+  id<MTLBuffer> interpolateInputBuffer = nil;
+  id<MTLBuffer> interpolateOutputBuffer = nil;
+  id<MTLBuffer> interpolateParamsBuffer = nil;
 
   // Buffers for orientation
-  id<MTLBuffer> orientationInputBuffer;
-  id<MTLBuffer> orientationOutputBuffer;
-  id<MTLBuffer> orientationParamsBuffer;
+  id<MTLBuffer> orientationInputBuffer = nil;
+  id<MTLBuffer> orientationOutputBuffer = nil;
+  id<MTLBuffer> orientationParamsBuffer = nil;
 
   // Buffers for descriptors
-  id<MTLBuffer> descriptorInputBuffer;
-  id<MTLBuffer> descriptorOutputBuffer;
-  id<MTLBuffer> descriptorParamsBuffer;
+  id<MTLBuffer> descriptorInputBuffer = nil;
+  id<MTLBuffer> descriptorOutputBuffer = nil;
+  id<MTLBuffer> descriptorParamsBuffer = nil;
 
   // Convolution kernel weights buffers for Gaussian series blur
   struct ConvPair {
-    id<MTLBuffer> paramsX;
-    id<MTLBuffer> paramsY;
+    id<MTLBuffer> paramsX = nil;
+    id<MTLBuffer> paramsY = nil;
   };
   std::vector<ConvPair> convPairs;
-  id<MTLTexture> convWorkTexture; // private storage 2DArray[1]
+  id<MTLTexture> convWorkTexture = nil; // private storage 2DArray[1]
 };
 
 static bool OctaveResourcesReady(const Octave& oct) {
@@ -829,6 +829,7 @@ void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
   }
 
   octaves_.clear();
+  octaves_.reserve(num_octaves);
   for (int o = 0; o < num_octaves; ++o) {
     float delta = delta_min_ * std::pow(2.0f, float(o));
     int ow = static_cast<int>(float(w) / delta);

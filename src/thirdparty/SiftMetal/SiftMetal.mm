@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstring>
 #include <dlfcn.h>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -641,19 +642,31 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
 // Init
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
+  if (max_w <= 0 || max_h <= 0 || opts.scales_per_octave <= 0 ||
+      (!opts.upright && opts.max_num_orientations <= 0)) {
+    return false;
+  }
+
   options_ = opts;
   const int max_num_features =
       options_.max_num_features > 0 ? options_.max_num_features
                                     : kMinDescriptorCapacity;
   const int max_num_orientations =
       options_.upright ? 1 : std::max(1, options_.max_num_orientations);
-  const int requested_descriptors = max_num_features * max_num_orientations;
+  const int64_t requested_descriptors =
+      static_cast<int64_t>(max_num_features) * max_num_orientations;
+  if (requested_descriptors > std::numeric_limits<int>::max()) {
+    return false;
+  }
+
+  const int requested_descriptor_capacity =
+      static_cast<int>(requested_descriptors);
   extrema_capacity_ =
-      std::max(kMinExtremaCapacity, requested_descriptors);
+      std::max(kMinExtremaCapacity, requested_descriptor_capacity);
   keypoint_capacity_ =
       std::max(kMinKeypointCapacity, max_num_features);
   descriptor_capacity_ =
-      std::max(kMinDescriptorCapacity, requested_descriptors);
+      std::max(kMinDescriptorCapacity, requested_descriptor_capacity);
 
   // Get the default Metal device.
   device_ = MTLCreateSystemDefaultDevice();

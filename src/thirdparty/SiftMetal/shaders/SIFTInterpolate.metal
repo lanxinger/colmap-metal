@@ -228,6 +228,9 @@ kernel void siftInterpolate(
     int i = 0;
     while (i < maxIterations) {
         alpha = interpolationStep(dogTextures, x, y, scale);
+        if (!all(isfinite(alpha))) {
+            return;
+        }
             
         if ((abs(alpha.x) < maxOffset) && (abs(alpha.y) < maxOffset) && (abs(alpha.z) < maxOffset)) {
             converged = true;
@@ -272,6 +275,9 @@ kernel void siftInterpolate(
     }
 
     value = interpolateContrast(dogTextures, x, y, scale, alpha);
+    if (!isfinite(value)) {
+        return;
+    }
         
     if (abs(value) <= parameters.dogThreshold) {
         return;

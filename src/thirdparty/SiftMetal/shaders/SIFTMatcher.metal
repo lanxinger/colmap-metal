@@ -121,19 +121,20 @@ kernel void siftMatchBest(
     }
   } else {
     for (uint idx2 = 0; idx2 < params.numDescriptors2; ++idx2) {
-      int score = int(kSqSiftDescriptorNorm);
-      if (!RejectByGuidedGeometry(params, keypoints1, keypoints2, gid, idx2)) {
-        const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
-        score = 0;
-        for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
-          const int v1 = int(descriptors1[desc1Offset + k]);
-          const int v2 = int(descriptors2[desc2Offset + k]);
-          if (params.distanceType == SIFT_MATCHER_DISTANCE_L2) {
-            const int diff = v1 - v2;
-            score += diff * diff;
-          } else {
-            score += v1 * v2;
-          }
+      if (RejectByGuidedGeometry(params, keypoints1, keypoints2, gid, idx2)) {
+        continue;
+      }
+
+      int score = 0;
+      const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
+      for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
+        const int v1 = int(descriptors1[desc1Offset + k]);
+        const int v2 = int(descriptors2[desc2Offset + k]);
+        if (params.distanceType == SIFT_MATCHER_DISTANCE_L2) {
+          const int diff = v1 - v2;
+          score += diff * diff;
+        } else {
+          score += v1 * v2;
         }
       }
 

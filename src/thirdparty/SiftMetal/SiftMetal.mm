@@ -143,13 +143,13 @@ class SiftMetalExtractorImpl {
 
   // Pipeline encoding helpers
   void EncodeGrayscaleUpload(id<MTLCommandBuffer> cb, int w, int h);
-  void EncodeSeedTexture(id<MTLCommandBuffer> cb);
-  void EncodeOctave(id<MTLCommandBuffer> cb, Octave& oct,
+  bool EncodeSeedTexture(id<MTLCommandBuffer> cb);
+  bool EncodeOctave(id<MTLCommandBuffer> cb, Octave& oct,
                     id<MTLTexture> inputTexture, bool inputIs2D);
-  void EncodeGaussianSeries(id<MTLCommandBuffer> cb, Octave& oct);
-  void EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct);
-  void EncodeGradients(id<MTLCommandBuffer> cb, Octave& oct);
-  void EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct);
+  bool EncodeGaussianSeries(id<MTLCommandBuffer> cb, Octave& oct);
+  bool EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct);
+  bool EncodeGradients(id<MTLCommandBuffer> cb, Octave& oct);
+  bool EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct);
 
   // Per-octave extraction
   int ReadExtremaCount(Octave& oct);
@@ -1033,15 +1033,24 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
   // Phase 1: Build scale-space pyramid (DoG + gradients + extrema).
   {
     id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
-    EncodeSeedTexture(cb);
+    if (!cb) {
+      return false;
+    }
+    if (!EncodeSeedTexture(cb)) {
+      return false;
+    }
 
     // First octave reads from seed texture (2D).
-    EncodeOctave(cb, octaves_[0], seedTexture_, true);
+    if (!EncodeOctave(cb, octaves_[0], seedTexture_, true)) {
+      return false;
+    }
 
     // Subsequent octaves read from previous octave's Gaussian textures.
     for (size_t i = 1; i < octaves_.size(); ++i) {
-      EncodeOctave(cb, octaves_[i],
-                   octaves_[i - 1].gaussianTextures, false);
+      if (!EncodeOctave(cb, octaves_[i],
+                        octaves_[i - 1].gaussianTextures, false)) {
+        return false;
+      }
     }
 
     if (!CommitAndWait(cb, @"scale-space")) {
@@ -1135,10 +1144,13 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
 // ---------------------------------------------------------------------------
 // EncodeSeedTexture: upscale grayscale input + Gaussian blur.
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
+bool SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
   // Bilinear upscale luminosity → scaled.
   if (seed_w_ != input_w_ || seed_h_ != input_h_) {
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!enc) {
+      return false;
+    }
     [enc setComputePipelineState:bilinearUpScalePipeline_];
     [enc setTexture:scaledTexture_ atIndex:0];
     [enc setTexture:luminosityTexture_ atIndex:1];
@@ -1151,6 +1163,9 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
   } else {
     // Same size: just copy.
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    if (!blit) {
+      return false;
+    }
     [blit copyFromTexture:luminosityTexture_ toTexture:scaledTexture_];
     [blit endEncoding];
   }
@@ -1158,6 +1173,9 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
   // Gaussian blur scaled → seed (separable 1D convolution).
   {
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!enc) {
+      return false;
+    }
     [enc setComputePipelineState:convolutionXPipeline_];
     [enc setTexture:seedConvWorkTexture_ atIndex:0];
     [enc setTexture:scaledTexture_ atIndex:1];
@@ -1171,6 +1189,9 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
   }
   {
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!enc) {
+      return false;
+    }
     [enc setComputePipelineState:convolutionYPipeline_];
     [enc setTexture:seedTexture_ atIndex:0];
     [enc setTexture:seedConvWorkTexture_ atIndex:1];
@@ -1182,37 +1203,49 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     [enc endEncoding];
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // EncodeOctave
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
+bool SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
                                            Octave& oct,
                                            id<MTLTexture> inputTexture,
                                            bool inputIs2D) {
+  if (!inputTexture) {
+    return false;
+  }
+
   int w = oct.width;
   int h = oct.height;
 
   // Copy/scale input into gaussian slice 0.
   if (inputIs2D) {
     // 2D texture → first slice of 2DArray.
-    if ((int)inputTexture.width == w && (int)inputTexture.height == h) {
-      id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-      [blit copyFromTexture:inputTexture
-                sourceSlice:0
-                sourceLevel:0
-              sourceOrigin:MTLOriginMake(0, 0, 0)
-                sourceSize:MTLSizeMake(w, h, 1)
-                 toTexture:oct.gaussianTextures
-          destinationSlice:0
-          destinationLevel:0
-         destinationOrigin:MTLOriginMake(0, 0, 0)];
-      [blit endEncoding];
+    if ((int)inputTexture.width != w || (int)inputTexture.height != h) {
+      return false;
     }
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    if (!blit) {
+      return false;
+    }
+    [blit copyFromTexture:inputTexture
+              sourceSlice:0
+              sourceLevel:0
+            sourceOrigin:MTLOriginMake(0, 0, 0)
+              sourceSize:MTLSizeMake(w, h, 1)
+               toTexture:oct.gaussianTextures
+        destinationSlice:0
+        destinationLevel:0
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
   } else {
     // Nearest-neighbor downscale from previous octave's gaussian[num_scales].
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!enc) {
+      return false;
+    }
     [enc setComputePipelineState:nearestNeighborDownScalePipeline_];
     [enc setTexture:oct.gaussianTextures atIndex:0];
     [enc setTexture:inputTexture atIndex:1];
@@ -1225,16 +1258,22 @@ void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
   }
 
   // Gaussian series blur.
-  EncodeGaussianSeries(cb, oct);
+  if (!EncodeGaussianSeries(cb, oct)) {
+    return false;
+  }
   // Differences.
-  EncodeDifferences(cb, oct);
+  if (!EncodeDifferences(cb, oct)) {
+    return false;
+  }
   // Gradients.
-  EncodeGradients(cb, oct);
+  if (!EncodeGradients(cb, oct)) {
+    return false;
+  }
   // Extrema detection.
-  EncodeExtrema(cb, oct);
+  return EncodeExtrema(cb, oct);
 }
 
-void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
+bool SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
                                                     Octave& oct) {
   int w = oct.width;
   int h = oct.height;
@@ -1246,6 +1285,9 @@ void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
     // X pass: gaussian → work
     {
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      if (!enc) {
+        return false;
+      }
       [enc setComputePipelineState:convolutionSeriesXPipeline_];
       [enc setTexture:oct.convWorkTexture atIndex:0];
       [enc setTexture:oct.gaussianTextures atIndex:1];
@@ -1256,6 +1298,9 @@ void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
     // Y pass: work → gaussian
     {
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      if (!enc) {
+        return false;
+      }
       [enc setComputePipelineState:convolutionSeriesYPipeline_];
       [enc setTexture:oct.gaussianTextures atIndex:0];
       [enc setTexture:oct.convWorkTexture atIndex:1];
@@ -1264,15 +1309,19 @@ void SiftMetalExtractorImpl::EncodeGaussianSeries(id<MTLCommandBuffer> cb,
       [enc endEncoding];
     }
   }
+  return true;
 }
 
-void SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb,
+bool SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb,
                                                  Octave& oct) {
   int w = oct.width;
   int h = oct.height;
   int numDiff = oct.num_scales + 2;
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc) {
+    return false;
+  }
   [enc setComputePipelineState:subtractPipeline_];
   [enc setTexture:oct.differenceTextures atIndex:0];
   [enc setTexture:oct.gaussianTextures atIndex:1];
@@ -1282,15 +1331,19 @@ void SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb,
                   (NSUInteger)(numDiff + 7) / 8};
   [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
   [enc endEncoding];
+  return true;
 }
 
-void SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb,
+bool SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb,
                                                Octave& oct) {
   int w = oct.width;
   int h = oct.height;
   int arrayLen = oct.num_scales + 3;
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc) {
+    return false;
+  }
   [enc setComputePipelineState:siftGradientPipeline_];
   [enc setTexture:oct.gradientTextures atIndex:0];
   [enc setTexture:oct.gaussianTextures atIndex:1];
@@ -1300,9 +1353,10 @@ void SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb,
                   (NSUInteger)(arrayLen + 7) / 8};
   [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
   [enc endEncoding];
+  return true;
 }
 
-void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
+bool SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
                                              Octave& oct) {
   int w = oct.width;
   int h = oct.height;
@@ -1313,6 +1367,9 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
   *idx = 0;
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc) {
+    return false;
+  }
   [enc setComputePipelineState:siftExtremaListPipeline_];
   [enc setBuffer:oct.extremaOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.extremaIndexBuffer offset:0 atIndex:1];
@@ -1328,6 +1385,7 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
                       (NSUInteger)(numDiff - 2)};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
+  return true;
 }
 
 // ---------------------------------------------------------------------------

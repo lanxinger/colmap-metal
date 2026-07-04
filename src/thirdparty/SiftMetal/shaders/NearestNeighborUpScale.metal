@@ -12,10 +12,10 @@ using namespace metal;
 kernel void nearestNeighborUpScale(
     texture2d<float, access::write> outputTexture [[texture(0)]],
     texture2d<float, access::read> inputTexture [[texture(1)]],
-    ushort2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    ushort2 inputSize = ushort2(inputTexture.get_width(), inputTexture.get_height());
-    ushort2 outputSize = ushort2(outputTexture.get_width(), outputTexture.get_height());
+    uint2 inputSize = uint2(inputTexture.get_width(), inputTexture.get_height());
+    uint2 outputSize = uint2(outputTexture.get_width(), outputTexture.get_height());
     if (gid.x >= outputSize.x || gid.y >= outputSize.y) {
         return;
     }

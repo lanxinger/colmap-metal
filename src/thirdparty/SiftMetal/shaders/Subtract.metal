@@ -12,11 +12,11 @@ using namespace metal;
 kernel void subtract(
     texture2d_array<float, access::write> outputTexture [[texture(0)]],
     texture2d_array<float, access::read> inputTexture [[texture(1)]],
-    ushort3 gid [[thread_position_in_grid]]
+    uint3 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= ushort(outputTexture.get_width()) ||
-        gid.y >= ushort(outputTexture.get_height()) ||
-        gid.z >= ushort(outputTexture.get_array_size())) {
+    if (gid.x >= outputTexture.get_width() ||
+        gid.y >= outputTexture.get_height() ||
+        gid.z >= outputTexture.get_array_size()) {
         return;
     }
 
@@ -25,4 +25,3 @@ kernel void subtract(
     float4 c = a - b;
     outputTexture.write(c, gid.xy, gid.z);
 }
-

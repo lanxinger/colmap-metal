@@ -129,7 +129,7 @@ kernel void siftDescriptors(
     device SIFTDescriptorInput * inputs [[buffer(1)]],
     device SIFTDescriptorParameters & parameters [[buffer(2)]],
     texture2d_array<float, access::read> gradientTextures [[texture(0)]],
-    ushort gid [[thread_position_in_grid]]
+    uint gid [[thread_position_in_grid]]
 ) {
    
 //    let octave = dog.octaves[keypoint.octave]
@@ -210,7 +210,8 @@ kernel void siftDescriptors(
                 continue;
             }
             
-            float2 g = gradientTextures.read(ushort2(px + j, py + i), input.scale).rg;
+            float2 g = gradientTextures.read(
+                uint2(uint(px + j), uint(py + i)), input.scale).rg;
             if (!all(isfinite(g)) || g.g <= 0.0f) {
                 continue;
             }

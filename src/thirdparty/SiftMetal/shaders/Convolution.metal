@@ -17,11 +17,11 @@ kernel void convolutionX(
     texture2d<float, access::read> inputTexture [[texture(1)]],
     device float * weights [[buffer(0)]],
     device uint & numberOfWeights [[buffer(1)]],
-    ushort2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
     const int width = inputTexture.get_width();
     const int height = outputTexture.get_height();
-    if (gid.x >= ushort(width) || gid.y >= ushort(height)) {
+    if (gid.x >= uint(width) || gid.y >= uint(height)) {
         return;
     }
     
@@ -30,7 +30,7 @@ kernel void convolutionX(
     const int o = (int)gid.x - (n / 2);
     for (int i = 0; i < n; i++) {
         int x = symmetrizedCoordinates(o + i, width);
-        sum += weights[i] * inputTexture.read(ushort2(x, gid.y)).r;
+        sum += weights[i] * inputTexture.read(uint2(uint(x), gid.y)).r;
     }
     outputTexture.write(float4(sum, 0, 0, 1), gid);
 }
@@ -41,11 +41,11 @@ kernel void convolutionY(
     texture2d<float, access::read> inputTexture [[texture(1)]],
     device float * weights [[buffer(0)]],
     device uint & numberOfWeights [[buffer(1)]],
-    ushort2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
     const int width = outputTexture.get_width();
     const int height = inputTexture.get_height();
-    if (gid.x >= ushort(width) || gid.y >= ushort(height)) {
+    if (gid.x >= uint(width) || gid.y >= uint(height)) {
         return;
     }
     
@@ -54,7 +54,7 @@ kernel void convolutionY(
     const int o = (int)gid.y - (n / 2);
     for (int i = 0; i < n; i++) {
         int y = symmetrizedCoordinates(o + i, height);
-        sum += weights[i] * inputTexture.read(ushort2(gid.x, y)).r;
+        sum += weights[i] * inputTexture.read(uint2(gid.x, uint(y))).r;
     }
     outputTexture.write(float4(sum, 0, 0, 1), gid);
 }

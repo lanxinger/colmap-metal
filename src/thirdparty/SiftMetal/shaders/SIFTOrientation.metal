@@ -117,7 +117,7 @@ void getOrientationsHistogram(
             float w = exp(-r2 / exponentDenominator);
 
             // Gradient orientation
-            float2 gradient = g.read(ushort2(x + i, y + j), scale).rg;
+            float2 gradient = g.read(uint2(uint(x + i), uint(y + j)), scale).rg;
             float orientation = gradient.x;
             float magnitude = gradient.y;
             
@@ -145,7 +145,7 @@ kernel void siftOrientation(
     device SIFTOrientationKeypoint * keypoints [[buffer(1)]],
     device SIFTOrientationParameters & parameters [[buffer(2)]],
     texture2d_array<float, access::read> gradientTextures [[texture(0)]],
-    ushort gid [[thread_position_in_grid]]
+    uint gid [[thread_position_in_grid]]
 ) {
     const int bins = SIFT_ORIENTATION_HISTOGRAM_BINS;
     const SIFTOrientationKeypoint keypoint = keypoints[gid];

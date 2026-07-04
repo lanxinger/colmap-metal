@@ -17,11 +17,11 @@ kernel void convolutionSeriesX(
     texture2d_array<float, access::write> outputTexture [[texture(0)]],
     texture2d_array<float, access::read> inputTexture [[texture(1)]],
     device ConvolutionParameters & parameters [[buffer(0)]],
-    ushort2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
     const int width = inputTexture.get_width();
     const int height = outputTexture.get_height();
-    if (gid.x >= ushort(width) || gid.y >= ushort(height)) {
+    if (gid.x >= uint(width) || gid.y >= uint(height)) {
         return;
     }
     
@@ -30,7 +30,8 @@ kernel void convolutionSeriesX(
     const int o = (int)gid.x - (n / 2);
     for (int i = 0; i < n; i++) {
         int x = symmetrizedCoordinates(o + i, width);
-        float c = inputTexture.read(ushort2(x, gid.y), parameters.inputDepth).r;
+        float c =
+            inputTexture.read(uint2(uint(x), gid.y), parameters.inputDepth).r;
         sum += parameters.weights[i] * c;
     }
     outputTexture.write(float4(sum, 0, 0, 1), gid, parameters.outputDepth);
@@ -41,11 +42,11 @@ kernel void convolutionSeriesY(
     texture2d_array<float, access::write> outputTexture [[texture(0)]],
     texture2d_array<float, access::read> inputTexture [[texture(1)]],
     device ConvolutionParameters & parameters [[buffer(0)]],
-    ushort2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
     const int width = outputTexture.get_width();
     const int height = inputTexture.get_height();
-    if (gid.x >= ushort(width) || gid.y >= ushort(height)) {
+    if (gid.x >= uint(width) || gid.y >= uint(height)) {
         return;
     }
     
@@ -54,7 +55,8 @@ kernel void convolutionSeriesY(
     const int o = (int)gid.y - (n / 2);
     for (int i = 0; i < n; i++) {
         int y = symmetrizedCoordinates(o + i, height);
-        float c = inputTexture.read(ushort2(gid.x, y), parameters.inputDepth).r;
+        float c =
+            inputTexture.read(uint2(gid.x, uint(y)), parameters.inputDepth).r;
         sum += parameters.weights[i] * c;
     }
     outputTexture.write(float4(sum, 0, 0, 1), gid, parameters.outputDepth);

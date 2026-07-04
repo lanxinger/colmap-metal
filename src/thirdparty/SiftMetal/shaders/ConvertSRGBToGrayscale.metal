@@ -11,10 +11,10 @@ using namespace metal;
 kernel void convertSRGBToGrayscale(
     texture2d<float, access::write> outputTexture [[texture(0)]],
     texture2d<float, access::read> inputTexture [[texture(1)]],
-    ushort2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= ushort(outputTexture.get_width()) ||
-        gid.y >= ushort(outputTexture.get_height())) {
+    if (gid.x >= outputTexture.get_width() ||
+        gid.y >= outputTexture.get_height()) {
         return;
     }
 
@@ -26,4 +26,3 @@ kernel void convertSRGBToGrayscale(
     const float4 output = float4(i, i, i, input.a);
     outputTexture.write(output, gid);
 }
-

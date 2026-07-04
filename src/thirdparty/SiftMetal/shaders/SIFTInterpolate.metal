@@ -13,6 +13,9 @@
 
 using namespace metal;
 
+static inline uint2 textureCoord(int x, int y) {
+    return uint2(uint(x), uint(y));
+}
 
 bool isOnEdge(
     texture2d_array<float, access::read> t [[texture(0)]],
@@ -21,18 +24,18 @@ bool isOnEdge(
     int s,
     float edgeThreshold
 ) {
-    const float v = t.read(ushort2(x, y), s).r;
+    const float v = t.read(textureCoord(x, y), s).r;
     
     // Compute the 2d Hessian at pixel (i,j) - i = y, j = x
     // IPOL implementation uses hxx for y axis, and hyy for x axis
-    const float zn = t.read(ushort2(x, y - 1), s).r;
-    const float zp = t.read(ushort2(x, y + 1), s).r;
-    const float pz = t.read(ushort2(x + 1, y), s).r;
-    const float nz = t.read(ushort2(x - 1, y), s).r;
-    const float pp = t.read(ushort2(x + 1, y + 1), s).r;
-    const float np = t.read(ushort2(x - 1, y + 1), s).r;
-    const float pn = t.read(ushort2(x + 1, y - 1), s).r;
-    const float nn = t.read(ushort2(x - 1, y - 1), s).r;
+    const float zn = t.read(textureCoord(x, y - 1), s).r;
+    const float zp = t.read(textureCoord(x, y + 1), s).r;
+    const float pz = t.read(textureCoord(x + 1, y), s).r;
+    const float nz = t.read(textureCoord(x - 1, y), s).r;
+    const float pp = t.read(textureCoord(x + 1, y + 1), s).r;
+    const float np = t.read(textureCoord(x - 1, y + 1), s).r;
+    const float pn = t.read(textureCoord(x + 1, y - 1), s).r;
+    const float nn = t.read(textureCoord(x - 1, y - 1), s).r;
 
     const float hxx = zn + zp - 2 * v;
     const float hyy = pz + nz - 2 * v;
@@ -67,12 +70,12 @@ float3 derivatives3D(
     int y,
     int s
 ) {
-    const float pzz = t.read(ushort2(x + 1, y), s).r;
-    const float nzz = t.read(ushort2(x - 1, y), s).r;
-    const float zpz = t.read(ushort2(x, y + 1), s).r;
-    const float znz = t.read(ushort2(x, y - 1), s).r;
-    const float zzp = t.read(ushort2(x, y), s + 1).r;
-    const float zzn = t.read(ushort2(x, y), s - 1).r;
+    const float pzz = t.read(textureCoord(x + 1, y), s).r;
+    const float nzz = t.read(textureCoord(x - 1, y), s).r;
+    const float zpz = t.read(textureCoord(x, y + 1), s).r;
+    const float znz = t.read(textureCoord(x, y - 1), s).r;
+    const float zzp = t.read(textureCoord(x, y), s + 1).r;
+    const float zzn = t.read(textureCoord(x, y), s - 1).r;
 
     // x: (i[c.z][c.x + 1, c.y] - i[c.z][c.x - 1, c.y]) * 0.5,
     // y: (i[c.z][c.x, c.y + 1] - i[c.z][c.x, c.y - 1]) * 0.5,
@@ -95,7 +98,7 @@ float interpolateContrast(
 ) {
     const float3 dD = derivatives3D(t, x, y, s);
     const float3 c = dD * alpha;
-    const float v = t.read(ushort2(x, y), s).r;
+    const float v = t.read(textureCoord(x, y), s).r;
     return v + c.x * 0.5;
 }
 
@@ -113,32 +116,32 @@ float3x3 hessian3D(
     int s
 ) {
     // z = zero, p = positive, n = negative
-    const float zzz = t.read(ushort2(x, y), s).r;
+    const float zzz = t.read(textureCoord(x, y), s).r;
     
-    const float pzz = t.read(ushort2(x + 1, y), s).r;
-    const float nzz = t.read(ushort2(x - 1, y), s).r;
+    const float pzz = t.read(textureCoord(x + 1, y), s).r;
+    const float nzz = t.read(textureCoord(x - 1, y), s).r;
     
-    const float zpz = t.read(ushort2(x, y + 1), s).r;
-    const float znz = t.read(ushort2(x, y - 1), s).r;
+    const float zpz = t.read(textureCoord(x, y + 1), s).r;
+    const float znz = t.read(textureCoord(x, y - 1), s).r;
 
-    const float zzp = t.read(ushort2(x, y), s + 1).r;
-    const float zzn = t.read(ushort2(x, y), s - 1).r;
+    const float zzp = t.read(textureCoord(x, y), s + 1).r;
+    const float zzn = t.read(textureCoord(x, y), s - 1).r;
     
-    const float ppz = t.read(ushort2(x + 1, y + 1), s).r;
-    const float nnz = t.read(ushort2(x - 1, y - 1), s).r;
+    const float ppz = t.read(textureCoord(x + 1, y + 1), s).r;
+    const float nnz = t.read(textureCoord(x - 1, y - 1), s).r;
     
-    const float npz = t.read(ushort2(x - 1, y + 1), s).r;
-    const float pnz = t.read(ushort2(x + 1, y - 1), s).r;
+    const float npz = t.read(textureCoord(x - 1, y + 1), s).r;
+    const float pnz = t.read(textureCoord(x + 1, y - 1), s).r;
     
-    const float pzp = t.read(ushort2(x + 1, y), s + 1).r;
-    const float nzp = t.read(ushort2(x - 1, y), s + 1).r;
-    const float zpp = t.read(ushort2(x, y + 1), s + 1).r;
-    const float znp = t.read(ushort2(x, y - 1), s + 1).r;
+    const float pzp = t.read(textureCoord(x + 1, y), s + 1).r;
+    const float nzp = t.read(textureCoord(x - 1, y), s + 1).r;
+    const float zpp = t.read(textureCoord(x, y + 1), s + 1).r;
+    const float znp = t.read(textureCoord(x, y - 1), s + 1).r;
     
-    const float pzn = t.read(ushort2(x + 1, y), s - 1).r;
-    const float nzn = t.read(ushort2(x - 1, y), s - 1).r;
-    const float zpn = t.read(ushort2(x, y + 1), s - 1).r;
-    const float znn = t.read(ushort2(x, y - 1), s - 1).r;
+    const float pzn = t.read(textureCoord(x + 1, y), s - 1).r;
+    const float nzn = t.read(textureCoord(x - 1, y), s - 1).r;
+    const float zpn = t.read(textureCoord(x, y + 1), s - 1).r;
+    const float znn = t.read(textureCoord(x, y - 1), s - 1).r;
 
 
     // let dxx = pzz + nzz - 2 * v
@@ -195,14 +198,14 @@ kernel void siftInterpolate(
     device SIFTInterpolateInputKeypoint * inputKeypoints [[buffer(1)]],
     device SIFTInterpolateParameters & parameters [[buffer(2)]],
     texture2d_array<float, access::read> dogTextures [[texture(0)]],
-    ushort gid [[thread_position_in_grid]]
+    uint gid [[thread_position_in_grid]]
 ) {
     SIFTInterpolateInputKeypoint input = inputKeypoints[gid];
     SIFTInterpolateOutputKeypoint output;
     output.converged = 0;
     outputKeypoints[gid] = output;
     
-    float value = dogTextures.read(ushort2(input.x, input.y), input.scale).r;
+    float value = dogTextures.read(textureCoord(input.x, input.y), input.scale).r;
         
     // Note: SiftGPU does not pre-filter below threshold.
     // Only the post-interpolation check (line 278) applies.

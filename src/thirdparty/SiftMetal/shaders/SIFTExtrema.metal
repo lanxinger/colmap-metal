@@ -54,7 +54,8 @@ static inline float fetch(
     const int3 neighborOffset = neighborOffsets[i];
     const int2 neighborDelta = g + neighborOffset.xy;
     const int textureIndex = s + neighborOffset.z;
-    const float neighborValue = texture.read((ushort2)neighborDelta, (short)textureIndex).r;
+    const float neighborValue =
+        texture.read(uint2(neighborDelta), uint(textureIndex)).r;
     return neighborValue;
 }
 
@@ -64,12 +65,12 @@ kernel void siftExtremaList(
     device atomic_uint * outputCount [[buffer(1)]],
     constant SIFTExtremaParameters & parameters [[buffer(2)]],
     texture2d_array<float, access::read> inputTexture [[texture(0)]],
-    ushort3 gid [[thread_position_in_grid]],
-    ushort3 lid [[thread_position_in_threadgroup]],
-    ushort tid [[thread_index_in_threadgroup]]
+    uint3 gid [[thread_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
     // Thread group runs [0...output.width - 2][0...output.height - 2]
-    const ushort threadsInThreadgroup = 1024;
+    const uint threadsInThreadgroup = 1024;
     threadgroup SIFTExtremaResult localResults[threadsInThreadgroup];
     threadgroup atomic_int localCount;
     atomic_store_explicit(&localCount, 0, memory_order_relaxed);
@@ -77,7 +78,7 @@ kernel void siftExtremaList(
     
     const int2 g = (int2)gid.xy + 1;
     const int s = (int)gid.z + 1;
-    const float value = inputTexture.read((ushort2)g, (ushort)s).r;
+    const float value = inputTexture.read(uint2(g), uint(s)).r;
     
     float minimum = +1000;
     float maximum = -1000;
@@ -117,9 +118,9 @@ kernel void siftExtremaList(
 kernel void siftExtrema(
     texture2d_array<float, access::write> outputTexture [[texture(0)]],
     texture2d_array<float, access::read> inputTexture [[texture(1)]],
-    ushort3 gid [[thread_position_in_grid]],
-    ushort3 threadPositionInThreadGroup [[thread_position_in_threadgroup]],
-    ushort3 threadsPerThreadGroup [[threads_per_threadgroup]]
+    uint3 gid [[thread_position_in_grid]],
+    uint3 threadPositionInThreadGroup [[thread_position_in_threadgroup]],
+    uint3 threadsPerThreadGroup [[threads_per_threadgroup]]
 ) {
     // Thread group runs [0...output.width - 2][0...output.height - 2]
     
@@ -131,9 +132,9 @@ kernel void siftExtrema(
 
     for (int i = 0; i < 26; i++) {
         int3 neighborOffset = neighborOffsets[i];
-        ushort textureIndex = gid.z + neighborOffset.x;
+        uint textureIndex = uint(int(gid.z) + neighborOffset.x);
         int2 neighborDelta = int2(neighborOffset.yz);
-        ushort2 coordinate = ushort2(center + neighborDelta);
+        uint2 coordinate = uint2(center + neighborDelta);
         float neighborValue = inputTexture.read(coordinate + 1, textureIndex).r;
 
         minValue = min(minValue, neighborValue);

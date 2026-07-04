@@ -516,8 +516,14 @@ bool SiftMetalMatcherImpl::RunOneWay(
   }
 
   id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
+  if (!commandBuffer) {
+    return false;
+  }
   id<MTLComputeCommandEncoder> encoder =
       [commandBuffer computeCommandEncoder];
+  if (!encoder) {
+    return false;
+  }
   [encoder setComputePipelineState:pipeline];
   [encoder setBuffer:descriptors1Buffer offset:0 atIndex:0];
   [encoder setBuffer:descriptors2Buffer offset:0 atIndex:1];
@@ -1365,7 +1371,13 @@ bool SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
   params->numberOfScales = static_cast<int32_t>(oct.num_scales);
 
   id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+  if (!cb) {
+    return false;
+  }
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc) {
+    return false;
+  }
   [enc setComputePipelineState:siftInterpolatePipeline_];
   [enc setBuffer:oct.interpolateOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.interpolateInputBuffer offset:0 atIndex:1];
@@ -1442,7 +1454,13 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
   if (validCount == 0) return true;
 
   id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+  if (!cb) {
+    return false;
+  }
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc) {
+    return false;
+  }
   [enc setComputePipelineState:siftOrientationPipeline_];
   [enc setBuffer:oct.orientationOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.orientationInputBuffer offset:0 atIndex:1];
@@ -1534,7 +1552,13 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
   }
 
   id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+  if (!cb) {
+    return false;
+  }
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc) {
+    return false;
+  }
   [enc setComputePipelineState:siftDescriptorsPipeline_];
   [enc setBuffer:oct.descriptorOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.descriptorInputBuffer offset:0 atIndex:1];

@@ -553,9 +553,18 @@ bool SiftMetalMatcherImpl::Match(
     const MatchOptions& options, MatchGuidedGeometry guided_geometry,
     const float matrix[9], float max_residual,
     std::vector<MatchResult>* matches) {
+  const bool valid_guided_geometry =
+      guided_geometry == MatchGuidedGeometry::NONE ||
+      guided_geometry == MatchGuidedGeometry::EPIPOLAR ||
+      guided_geometry == MatchGuidedGeometry::HOMOGRAPHY;
   if (!matches || num_descriptors1 < 0 || num_descriptors2 < 0 ||
       (num_descriptors1 > 0 && !descriptors1) ||
-      (num_descriptors2 > 0 && !descriptors2)) {
+      (num_descriptors2 > 0 && !descriptors2) ||
+      !valid_guided_geometry || !std::isfinite(options.max_ratio) ||
+      !std::isfinite(options.max_distance) || options.max_ratio <= 0.0f ||
+      options.max_distance <= 0.0f ||
+      (guided_geometry != MatchGuidedGeometry::NONE &&
+       (!matrix || !std::isfinite(max_residual) || max_residual < 0.0f))) {
     return false;
   }
 

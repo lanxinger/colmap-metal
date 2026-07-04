@@ -19,9 +19,12 @@ bool normalizeFeatures(
     float magnitude = 0;
     for (int i = 0; i < count; i++) {
         float f = features[i];
+        if (!isfinite(f)) {
+            return false;
+        }
         magnitude += (f * f);
     }
-    if (magnitude <= 0.0f) {
+    if (!isfinite(magnitude) || magnitude <= 0.0f) {
         return false;
     }
     const float d = 1.0 / sqrt(magnitude);

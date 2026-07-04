@@ -1059,11 +1059,19 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     for (int k = 0; k < extremaCount; ++k) {
       auto& p = interpOut[k];
       if (!p.converged) continue;
+      if (p.scale < 0 || p.scale >= static_cast<int32_t>(oct.sigmas.size()) ||
+          !std::isfinite(p.absoluteX) || !std::isfinite(p.absoluteY) ||
+          !std::isfinite(p.subScale)) {
+        continue;
+      }
 
       Keypoint kp;
       kp.x = p.absoluteX;
       kp.y = p.absoluteY;
       kp.sigma = oct.sigmas[p.scale] * std::pow(sigmaRatio, p.subScale);
+      if (!std::isfinite(kp.sigma) || kp.sigma <= 0.0f) {
+        continue;
+      }
       kp.orientation = 0; // Will be set during orientation pass.
       octKeypoints.push_back(kp);
     }
@@ -1455,6 +1463,9 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
   for (int k = 0; k < validCount; ++k) {
     auto& res = orientOut[k];
     int kpIdx = static_cast<int>(res.keypoint);
+    if (kpIdx < 0 || kpIdx >= static_cast<int>(keypoints.size())) {
+      continue;
+    }
     int count = static_cast<int>(res.count);
     int maxOrient = options_.upright ? 1 : options_.max_num_orientations;
     count = std::min({std::max(count, 0),

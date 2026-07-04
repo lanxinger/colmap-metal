@@ -19,6 +19,17 @@ set(METAL_SHADERS
     ${SIFT_METAL_SHADER_DIR}/Subtract.metal
 )
 
+set(METAL_SHADER_HEADERS
+    ${SIFT_METAL_SHADER_DIR}/Common.hpp
+    ${SIFT_METAL_INCLUDE_DIR}/ConvolutionSeries.h
+    ${SIFT_METAL_INCLUDE_DIR}/NearestNeighbor.h
+    ${SIFT_METAL_INCLUDE_DIR}/SIFTDescriptor.h
+    ${SIFT_METAL_INCLUDE_DIR}/SIFTExtrema.h
+    ${SIFT_METAL_INCLUDE_DIR}/SIFTInterpolate.h
+    ${SIFT_METAL_INCLUDE_DIR}/SIFTMatcher.h
+    ${SIFT_METAL_INCLUDE_DIR}/SIFTOrientation.h
+)
+
 set(METALLIB_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/sift.metallib")
 
 # Compile each .metal to .air, then link into .metallib.
@@ -33,7 +44,7 @@ foreach(SHADER ${METAL_SHADERS})
             -o ${AIR_FILE}
             -I ${SIFT_METAL_INCLUDE_DIR}
             -I ${SIFT_METAL_SHADER_DIR}
-        DEPENDS ${SHADER}
+        DEPENDS ${SHADER} ${METAL_SHADER_HEADERS}
         COMMENT "Compiling Metal shader ${SHADER_NAME}.metal"
     )
     list(APPEND AIR_FILES ${AIR_FILE})

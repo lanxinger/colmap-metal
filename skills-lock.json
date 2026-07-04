@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "metal-shader-expert": {
+      "source": "erichowens/some_claude_skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/metal-shader-expert/SKILL.md",
+      "computedHash": "14dfd898f5781126002398efabbe7a5650ae2e12da4a7f8b9f286899e6a5e891"
+    }
+  }
+}

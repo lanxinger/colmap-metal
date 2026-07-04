@@ -98,6 +98,14 @@ void ExpectReversedMatches(const FeatureMatches& matches) {
   EXPECT_EQ(matches[1].point2D_idx2, 0);
 }
 
+void ExpectIdentityMatches(const FeatureMatches& matches) {
+  EXPECT_EQ(matches.size(), 2);
+  EXPECT_EQ(matches[0].point2D_idx1, 0);
+  EXPECT_EQ(matches[0].point2D_idx2, 0);
+  EXPECT_EQ(matches[1].point2D_idx1, 1);
+  EXPECT_EQ(matches[1].point2D_idx2, 1);
+}
+
 void ExpectReversedInlierMatches(const TwoViewGeometry& two_view_geometry) {
   EXPECT_EQ(two_view_geometry.inlier_matches.size(), 2);
   EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 0);
@@ -785,6 +793,45 @@ TEST(MatchSiftFeaturesGPU, Nominal) {
     EXPECT_EQ(matches.size(), 0);
   });
 }
+
+#if defined(COLMAP_METAL_ENABLED)
+TEST(MatchSiftFeaturesGPU, RefreshesReusedDescriptorPointer) {
+  RunGpuTest([] {
+    const Camera camera = Camera::CreateFromModelId(
+        1, CameraModelId::kSimplePinhole, 100.0, 100, 200);
+    auto descriptors1 =
+        std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2));
+    auto descriptors2 = std::make_shared<FeatureDescriptors>(
+        CreateReversedDescriptors(*descriptors1));
+    const FeatureMatcher::Image image1 = {
+        /*image_id=*/1, /*camera=*/&camera, /*keypoints=*/nullptr,
+        descriptors1};
+    const FeatureMatcher::Image image2 = {
+        /*image_id=*/2, /*camera=*/&camera, /*keypoints=*/nullptr,
+        descriptors2};
+
+    FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+    options.use_gpu = true;
+    options.max_num_matches = 1000;
+    auto matcher = THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+
+    FeatureMatches matches;
+    matcher->Match(image1, image2, &matches);
+    ExpectReversedMatches(matches);
+
+    const uint8_t* descriptor_data = descriptors2->data.data();
+    for (Eigen::Index r = 0; r < descriptors2->data.rows(); ++r) {
+      for (Eigen::Index c = 0; c < descriptors2->data.cols(); ++c) {
+        descriptors2->data(r, c) = descriptors1->data(r, c);
+      }
+    }
+    ASSERT_EQ(descriptors2->data.data(), descriptor_data);
+
+    matcher->Match(image1, image2, &matches);
+    ExpectIdentityMatches(matches);
+  });
+}
+#endif
 
 TEST(MatchSiftFeaturesCPUvsGPU, Nominal) {
   RunGpuTest([] {

@@ -275,6 +275,15 @@ static bool CommitAndWait(id<MTLCommandBuffer> commandBuffer,
   return true;
 }
 
+static uint64_t HashDescriptorBytes(const uint8_t* bytes, size_t size) {
+  uint64_t hash = 1469598103934665603ull;
+  for (size_t i = 0; i < size; ++i) {
+    hash ^= bytes[i];
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
 static NSArray<NSString*>* MetalLibraryCandidatePaths();
 
 // ---------------------------------------------------------------------------
@@ -310,6 +319,7 @@ class SiftMetalMatcherImpl {
     const uint8_t* descriptors = nullptr;
     int num_descriptors = 0;
     size_t byte_size = 0;
+    uint64_t content_hash = 0;
     uint64_t last_used = 0;
     id<MTLBuffer> buffer = nil;
   };
@@ -380,10 +390,20 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
 
   const size_t descriptor_bytes =
       static_cast<size_t>(num_descriptors) * SIFT_MATCHER_DESCRIPTOR_DIM;
+  const uint64_t content_hash =
+      HashDescriptorBytes(descriptors, descriptor_bytes);
   ++descriptor_buffer_cache_tick_;
-  for (auto& entry : descriptor_buffer_cache_) {
+  for (auto it = descriptor_buffer_cache_.begin();
+       it != descriptor_buffer_cache_.end();
+       ++it) {
+    auto& entry = *it;
     if (entry.descriptors == descriptors &&
         entry.num_descriptors == num_descriptors) {
+      if (entry.content_hash != content_hash) {
+        descriptor_buffer_cache_bytes_ -= entry.byte_size;
+        descriptor_buffer_cache_.erase(it);
+        break;
+      }
       entry.last_used = descriptor_buffer_cache_tick_;
       return entry.buffer;
     }
@@ -407,6 +427,7 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
       descriptors,
       num_descriptors,
       descriptor_bytes,
+      content_hash,
       descriptor_buffer_cache_tick_,
       buffer});
   descriptor_buffer_cache_bytes_ += descriptor_bytes;

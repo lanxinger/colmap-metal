@@ -20,6 +20,10 @@ kernel void convolutionX(
     ushort2 gid [[thread_position_in_grid]]
 ) {
     const int width = inputTexture.get_width();
+    const int height = outputTexture.get_height();
+    if (gid.x >= ushort(width) || gid.y >= ushort(height)) {
+        return;
+    }
     
     float sum = 0;
     const int n = (int)numberOfWeights;
@@ -39,7 +43,11 @@ kernel void convolutionY(
     device uint & numberOfWeights [[buffer(1)]],
     ushort2 gid [[thread_position_in_grid]]
 ) {
+    const int width = outputTexture.get_width();
     const int height = inputTexture.get_height();
+    if (gid.x >= ushort(width) || gid.y >= ushort(height)) {
+        return;
+    }
     
     float sum = 0;
     const int n = (int)numberOfWeights;

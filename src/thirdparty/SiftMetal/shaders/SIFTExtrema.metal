@@ -62,6 +62,7 @@ static inline float fetch(
 kernel void siftExtremaList(
     device SIFTExtremaResult * output [[buffer(0)]],
     device atomic_uint * outputCount [[buffer(1)]],
+    constant SIFTExtremaParameters & parameters [[buffer(2)]],
     texture2d_array<float, access::read> inputTexture [[texture(0)]],
     ushort3 gid [[thread_position_in_grid]],
     ushort3 lid [[thread_position_in_threadgroup]],
@@ -72,7 +73,7 @@ kernel void siftExtremaList(
     threadgroup SIFTExtremaResult localResults[threadsInThreadgroup];
     threadgroup atomic_int localCount;
     atomic_store_explicit(&localCount, 0, memory_order_relaxed);
-    threadgroup_barrier(mem_flags::mem_none);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     
     const int2 g = (int2)gid.xy + 1;
     const int s = (int)gid.z + 1;
@@ -81,7 +82,7 @@ kernel void siftExtremaList(
     float minimum = +1000;
     float maximum = -1000;
 
-    for (int i = 1; i < 26; i++) {
+    for (int i = 0; i < 26; i++) {
         float neighborValue = fetch(inputTexture, g, s, i);
         minimum = min(minimum, neighborValue);
         maximum = max(maximum, neighborValue);
@@ -97,13 +98,16 @@ kernel void siftExtremaList(
     }
     
     // Copy local results to output
-    threadgroup_barrier(mem_flags::mem_none);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid == 0) {
         const int count = atomic_load_explicit(&localCount, memory_order_relaxed);
         if (count > 0) {
-            const int b = atomic_fetch_add_explicit(outputCount, count, memory_order_relaxed);
-            for (int i = 0; i < count; i++) {
-                output[b + i] = localResults[i];
+            const uint b = atomic_fetch_add_explicit(outputCount, uint(count), memory_order_relaxed);
+            if (b < parameters.capacity) {
+                const uint writable = min(uint(count), parameters.capacity - b);
+                for (uint i = 0; i < writable; i++) {
+                    output[b + i] = localResults[i];
+                }
             }
         }
     }
@@ -144,4 +148,3 @@ kernel void siftExtrema(
 
     outputTexture.write(float4(result, 0, 0, 1), gid.xy + 1, gid.z);
 }
-

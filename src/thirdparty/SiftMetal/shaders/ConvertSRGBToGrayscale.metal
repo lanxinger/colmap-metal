@@ -13,6 +13,11 @@ kernel void convertSRGBToGrayscale(
     texture2d<float, access::read> inputTexture [[texture(1)]],
     ushort2 gid [[thread_position_in_grid]]
 ) {
+    if (gid.x >= ushort(outputTexture.get_width()) ||
+        gid.y >= ushort(outputTexture.get_height())) {
+        return;
+    }
+
     const float4 input = inputTexture.read(gid);
     const float i = 0 +
         (0.212639005871510 * input.r) +
@@ -21,5 +26,4 @@ kernel void convertSRGBToGrayscale(
     const float4 output = float4(i, i, i, input.a);
     outputTexture.write(output, gid);
 }
-
 

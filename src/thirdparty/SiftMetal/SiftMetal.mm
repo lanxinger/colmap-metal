@@ -71,6 +71,7 @@ struct Octave {
   // Buffers for extrema detection
   id<MTLBuffer> extremaOutputBuffer;
   id<MTLBuffer> extremaIndexBuffer;
+  id<MTLBuffer> extremaParamsBuffer;
 
   // Buffers for interpolation
   id<MTLBuffer> interpolateInputBuffer;
@@ -121,11 +122,11 @@ class SiftMetalExtractorImpl {
 
   // Per-octave extraction
   int ReadExtremaCount(Octave& oct);
-  void InterpolateKeypoints(Octave& oct, int extrema_count);
-  void ComputeOrientations(Octave& oct,
+  bool InterpolateKeypoints(Octave& oct, int extrema_count);
+  bool ComputeOrientations(Octave& oct,
                            const std::vector<Keypoint>& keypoints,
                            std::vector<std::pair<int, float>>& oriented);
-  void ComputeDescriptors(Octave& oct,
+  bool ComputeDescriptors(Octave& oct,
                           const std::vector<Keypoint>& keypoints,
                           const std::vector<std::pair<int, float>>& oriented,
                           ExtractResult* result);
@@ -221,6 +222,23 @@ static id<MTLTexture> MakeTexture2DArray(id<MTLDevice> device, int w, int h,
   desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
   desc.storageMode = storage;
   return [device newTextureWithDescriptor:desc];
+}
+
+static bool CommitAndWait(id<MTLCommandBuffer> commandBuffer,
+                          NSString* label) {
+  if (!commandBuffer) {
+    NSLog(@"SiftMetal: Failed to create command buffer for %@", label);
+    return false;
+  }
+  [commandBuffer commit];
+  [commandBuffer waitUntilCompleted];
+  if (commandBuffer.error) {
+    NSLog(@"SiftMetal: %@ command buffer failed: %@",
+          label,
+          commandBuffer.error);
+    return false;
+  }
+  return true;
 }
 
 static NSArray<NSString*>* MetalLibraryCandidatePaths();
@@ -485,12 +503,7 @@ bool SiftMetalMatcherImpl::RunOneWay(
         threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
   }
   [encoder endEncoding];
-  [commandBuffer commit];
-  [commandBuffer waitUntilCompleted];
-
-  if (commandBuffer.error) {
-    NSLog(@"SiftMetal: Matching command buffer failed: %@",
-          commandBuffer.error);
+  if (!CommitAndWait(commandBuffer, @"matching")) {
     return false;
   }
 
@@ -665,10 +678,10 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
                                       MTLStorageModeShared);
   scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                   MTLPixelFormatR32Float,
-                                  MTLStorageModeShared);
+                                  MTLStorageModePrivate);
   seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                 MTLPixelFormatR32Float,
-                                MTLStorageModeShared);
+                                MTLStorageModePrivate);
   seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                         MTLPixelFormatR32Float,
                                         MTLStorageModePrivate);
@@ -752,13 +765,13 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   oct.gaussianTextures = MakeTexture2DArray(
       device_, w, h, numGaussians, MTLPixelFormatR32Float,
-      MTLStorageModeShared);
+      MTLStorageModePrivate);
   oct.differenceTextures = MakeTexture2DArray(
       device_, w, h, numDifferences, MTLPixelFormatR32Float,
-      MTLStorageModeShared);
+      MTLStorageModePrivate);
   oct.gradientTextures = MakeTexture2DArray(
       device_, w, h, numGaussians, MTLPixelFormatRG32Float,
-      MTLStorageModeShared);
+      MTLStorageModePrivate);
 
   // Convolution work texture (single-slice private).
   oct.convWorkTexture = MakeTexture2DArray(
@@ -771,15 +784,15 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
     float sb = sigmas[s];
     float rho = std::sqrt(sb * sb - sa * sa) / delta;
     auto weights = GaussianWeights(rho);
+    const size_t weight_count =
+        std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH);
 
     // X pass: read from slice [s-1], write to work slice [0]
     ConvolutionParameters paramsX = {};
     paramsX.inputDepth = static_cast<int32_t>(s - 1);
     paramsX.outputDepth = 0;
-    paramsX.count = static_cast<int32_t>(weights.size());
-    std::memcpy(paramsX.weights, weights.data(),
-                std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH) *
-                    sizeof(float));
+    paramsX.count = static_cast<int32_t>(weight_count);
+    std::memcpy(paramsX.weights, weights.data(), weight_count * sizeof(float));
     oct.convPairs[s - 1].paramsX =
         [device_ newBufferWithBytes:&paramsX
                              length:sizeof(ConvolutionParameters)
@@ -789,10 +802,8 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
     ConvolutionParameters paramsY = {};
     paramsY.inputDepth = 0;
     paramsY.outputDepth = static_cast<int32_t>(s);
-    paramsY.count = static_cast<int32_t>(weights.size());
-    std::memcpy(paramsY.weights, weights.data(),
-                std::min(weights.size(), (size_t)CONVOLUTION_WEIGHTS_LENGTH) *
-                    sizeof(float));
+    paramsY.count = static_cast<int32_t>(weight_count);
+    std::memcpy(paramsY.weights, weights.data(), weight_count * sizeof(float));
     oct.convPairs[s - 1].paramsY =
         [device_ newBufferWithBytes:&paramsY
                              length:sizeof(ConvolutionParameters)
@@ -804,8 +815,14 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
       [device_ newBufferWithLength:kMaxExtrema * sizeof(SIFTExtremaResult)
                            options:MTLResourceStorageModeShared];
   oct.extremaIndexBuffer =
-      [device_ newBufferWithLength:sizeof(int32_t)
+      [device_ newBufferWithLength:sizeof(uint32_t)
                            options:MTLResourceStorageModeShared];
+  SIFTExtremaParameters extrema_params = {};
+  extrema_params.capacity = static_cast<uint32_t>(kMaxExtrema);
+  oct.extremaParamsBuffer =
+      [device_ newBufferWithBytes:&extrema_params
+                           length:sizeof(SIFTExtremaParameters)
+                          options:MTLResourceStorageModeShared];
 
   // Interpolation buffers
   oct.interpolateInputBuffer =
@@ -866,10 +883,10 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                                         MTLStorageModeShared);
     scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                     MTLPixelFormatR32Float,
-                                    MTLStorageModeShared);
+                                    MTLStorageModePrivate);
     seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                   MTLPixelFormatR32Float,
-                                  MTLStorageModeShared);
+                                  MTLStorageModePrivate);
     seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                           MTLPixelFormatR32Float,
                                           MTLStorageModePrivate);
@@ -910,8 +927,9 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                    octaves_[i - 1].gaussianTextures, false);
     }
 
-    [cb commit];
-    [cb waitUntilCompleted];
+    if (!CommitAndWait(cb, @"scale-space")) {
+      return false;
+    }
   }
 
   // Phase 2: For each octave, read extrema, interpolate, orientate, describe.
@@ -920,7 +938,9 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     if (extremaCount <= 0) continue;
     extremaCount = std::min(extremaCount, kMaxExtrema);
 
-    InterpolateKeypoints(oct, extremaCount);
+    if (!InterpolateKeypoints(oct, extremaCount)) {
+      return false;
+    }
 
     // Read interpolated keypoints.
     auto* interpOut = static_cast<SIFTInterpolateOutputKeypoint*>(
@@ -944,12 +964,16 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
 
     // Compute orientations.
     std::vector<std::pair<int, float>> oriented; // (keypoint_index, theta)
-    ComputeOrientations(oct, octKeypoints, oriented);
+    if (!ComputeOrientations(oct, octKeypoints, oriented)) {
+      return false;
+    }
 
     if (oriented.empty()) continue;
 
     // Compute descriptors.
-    ComputeDescriptors(oct, octKeypoints, oriented, result);
+    if (!ComputeDescriptors(oct, octKeypoints, oriented, result)) {
+      return false;
+    }
   }
 
   // Sort by scale (descending) and truncate to max_num_features.
@@ -1063,9 +1087,6 @@ void SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
     }
   } else {
     // Nearest-neighbor downscale from previous octave's gaussian[num_scales].
-    auto* params = static_cast<NearestNeighborScaleParameters*>(
-        [device_ newBufferWithLength:sizeof(NearestNeighborScaleParameters)
-                             options:MTLResourceStorageModeShared].contents);
     id<MTLBuffer> paramsBuf =
         [device_ newBufferWithLength:sizeof(NearestNeighborScaleParameters)
                              options:MTLResourceStorageModeShared];
@@ -1170,16 +1191,18 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
   int numDiff = oct.num_scales + 2;
 
   // Reset index counter.
-  auto* idx = static_cast<int32_t*>(oct.extremaIndexBuffer.contents);
+  auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
   *idx = 0;
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:siftExtremaListPipeline_];
   [enc setBuffer:oct.extremaOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.extremaIndexBuffer offset:0 atIndex:1];
+  [enc setBuffer:oct.extremaParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.differenceTextures atIndex:0];
 
-  NSUInteger maxThreads = siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup;
+  NSUInteger maxThreads = std::min<NSUInteger>(
+      siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup, 1024);
   NSUInteger dim = (NSUInteger)std::cbrt((double)maxThreads);
   MTLSize tg = {dim, dim, dim};
   MTLSize gridSize = {(NSUInteger)(w - 2),
@@ -1193,7 +1216,7 @@ void SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
 // ReadExtremaCount
 // ---------------------------------------------------------------------------
 int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
-  auto* idx = static_cast<int32_t*>(oct.extremaIndexBuffer.contents);
+  auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
   int count = static_cast<int>(*idx);
   *idx = 0;
   return count;
@@ -1202,7 +1225,7 @@ int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
 // ---------------------------------------------------------------------------
 // InterpolateKeypoints
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
+bool SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
                                                     int extremaCount) {
   int count = std::min(extremaCount, kMaxKeypoints);
 
@@ -1244,14 +1267,13 @@ void SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 
-  [cb commit];
-  [cb waitUntilCompleted];
+  return CommitAndWait(cb, @"keypoint interpolation");
 }
 
 // ---------------------------------------------------------------------------
 // ComputeOrientations
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::ComputeOrientations(
+bool SiftMetalExtractorImpl::ComputeOrientations(
     Octave& oct, const std::vector<Keypoint>& keypoints,
     std::vector<std::pair<int, float>>& oriented) {
   oriented.clear();
@@ -1306,7 +1328,7 @@ void SiftMetalExtractorImpl::ComputeOrientations(
     ++validCount;
   }
 
-  if (validCount == 0) return;
+  if (validCount == 0) return true;
 
   id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -1323,8 +1345,9 @@ void SiftMetalExtractorImpl::ComputeOrientations(
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 
-  [cb commit];
-  [cb waitUntilCompleted];
+  if (!CommitAndWait(cb, @"orientation")) {
+    return false;
+  }
 
   // Read orientation results.
   auto* orientOut = static_cast<SIFTOrientationResult*>(
@@ -1341,17 +1364,18 @@ void SiftMetalExtractorImpl::ComputeOrientations(
       oriented.emplace_back(kpIdx, theta);
     }
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // ComputeDescriptors
 // ---------------------------------------------------------------------------
-void SiftMetalExtractorImpl::ComputeDescriptors(
+bool SiftMetalExtractorImpl::ComputeDescriptors(
     Octave& oct, const std::vector<Keypoint>& keypoints,
     const std::vector<std::pair<int, float>>& oriented,
     ExtractResult* result) {
   int count = std::min((int)oriented.size(), kMaxDescriptors);
-  if (count == 0) return;
+  if (count == 0) return true;
 
   auto* params =
       static_cast<SIFTDescriptorParameters*>(oct.descriptorParamsBuffer.contents);
@@ -1405,8 +1429,9 @@ void SiftMetalExtractorImpl::ComputeDescriptors(
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
 
-  [cb commit];
-  [cb waitUntilCompleted];
+  if (!CommitAndWait(cb, @"descriptor")) {
+    return false;
+  }
 
   // Read descriptors.
   auto* descOut = static_cast<SIFTDescriptorResult*>(
@@ -1432,6 +1457,7 @@ void SiftMetalExtractorImpl::ComputeDescriptors(
           static_cast<float>(dr.features[j]) / 512.0f);
     }
   }
+  return true;
 }
 
 // ===========================================================================

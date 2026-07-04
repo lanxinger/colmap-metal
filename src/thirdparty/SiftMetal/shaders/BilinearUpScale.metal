@@ -14,9 +14,11 @@ kernel void bilinearUpScale(
     texture2d<float, access::read> inputTexture [[texture(1)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    
     const int wo = outputTexture.get_width();
     const int ho = outputTexture.get_height();
+    if (gid.x >= uint(wo) || gid.y >= uint(ho)) {
+        return;
+    }
     
     const int wi = inputTexture.get_width();
     const int hi = inputTexture.get_height();

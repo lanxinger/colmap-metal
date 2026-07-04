@@ -12,7 +12,7 @@
 using namespace metal;
 
 
-void normalizeFeatures(
+bool normalizeFeatures(
     int count,
     thread float * features
 ) {
@@ -21,10 +21,14 @@ void normalizeFeatures(
         float f = features[i];
         magnitude += (f * f);
     }
+    if (magnitude <= 0.0f) {
+        return false;
+    }
     const float d = 1.0 / sqrt(magnitude);
     for (int i = 0; i < count; i++) {
         features[i] *= d;
     }
+    return true;
 }
 
     
@@ -128,8 +132,11 @@ kernel void siftDescriptors(
 //    let octave = dog.octaves[keypoint.octave]
     // let images = octave.gaussianImages
     // let histogramsPerAxis = configuration.descriptorHistogramsPerAxis
-    SIFTDescriptorResult result;
     const SIFTDescriptorInput input = inputs[gid];
+    SIFTDescriptorResult result;
+    result.valid = 0;
+    result.keypoint = input.keypoint;
+    result.theta = input.theta;
     
     
 //    let image = octaves[keypoint.octave].gradientImages[keypoint.scale]
@@ -165,23 +172,17 @@ kernel void siftDescriptors(
     const float histogramWidth = 3.0 * scale; // 3.0 constant from Whess (OpenSIFT)
     const int radius = histogramWidth * sqrt(2.0) * ((float)d + 1.0) * 0.5 + 0.5;
     
-//    const int minX = radius;
-//    const int minY = radius;
-//    const int maxX = parameters.width - 1 - radius;
-//    const int maxY = parameters.height - 1 - radius;
-//
-//    if (px < minX) {
-//        return;
-//    }
-//    if (py < minY) {
-//        return;
-//    }
-//    if (px > maxX) {
-//        return;
-//    }
-//    if (py > maxY) {
-//        return;
-//    }
+    const int minX = radius;
+    const int minY = radius;
+    const int maxX = parameters.width - 1 - radius;
+    const int maxY = parameters.height - 1 - radius;
+    const int maxScale = parameters.scalesPerOctave + 2;
+
+    if (px < minX || py < minY || px > maxX || py > maxY ||
+        input.scale < 0 || input.scale > maxScale) {
+        results[gid] = result;
+        return;
+    }
 
     // Create histograms
     const int featureCount = d * d * bins;
@@ -224,12 +225,18 @@ kernel void siftDescriptors(
     // print("feature x=\(Int(a.x)) y=\(Int(a.y)) scale=\(scale) sigma=\(_sigma) histogramWidth=\(histogramWidth) radius=\(radius)")
     
     // Serialize histograms into array
-    normalizeFeatures(featureCount, features);
+    if (!normalizeFeatures(featureCount, features)) {
+        results[gid] = result;
+        return;
+    }
     thresholdFeatures(featureCount, features, 0.2);
-    normalizeFeatures(featureCount, features);
+    if (!normalizeFeatures(featureCount, features)) {
+        results[gid] = result;
+        return;
+    }
     quantizeFeatures(featureCount, features, result.features);
     
-    result.valid = true;
+    result.valid = 1;
     result.keypoint = input.keypoint;
     result.theta = input.theta;
     

@@ -17,4 +17,8 @@ struct SIFTExtremaResult {
     int32_t scale;
 };
 
+struct SIFTExtremaParameters {
+    uint32_t capacity;
+};
+
 #endif /* SIFTExtrema_h */

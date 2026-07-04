@@ -17,6 +17,12 @@ kernel void siftGradient(
      texture2d_array<float, access::read> inputTexture [[texture(1)]],
      ushort3 gid [[thread_position_in_grid]]
 ) {
+    if (gid.x >= ushort(outputTexture.get_width()) ||
+        gid.y >= ushort(outputTexture.get_height()) ||
+        gid.z >= ushort(outputTexture.get_array_size())) {
+        return;
+    }
+
     const int gx = (int)gid.x;
     const int gy = (int)gid.y;
     const int gz = (int)gid.z;
@@ -37,4 +43,3 @@ kernel void siftGradient(
     float om = sqrt(tx * tx + ty * ty);
     outputTexture.write(float4(oa, om, 0, 0), ushort2(gx, gy), gz);
 }
-

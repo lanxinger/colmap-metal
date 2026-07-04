@@ -18,5 +18,14 @@ kernel void nearestNeighborDownScale(
     device NearestNeighborScaleParameters & parameters [[buffer(0)]],
     ushort2 gid [[thread_position_in_grid]]
 ) {
-    outputTexture.write(inputTexture.read(gid * 2, parameters.inputSlice), gid, parameters.outputSlice);
+    const ushort width = ushort(outputTexture.get_width());
+    const ushort height = ushort(outputTexture.get_height());
+    if (gid.x >= width || gid.y >= height) {
+        return;
+    }
+
+    const ushort inputWidth = ushort(inputTexture.get_width());
+    const ushort inputHeight = ushort(inputTexture.get_height());
+    const ushort2 source = min(gid * 2, ushort2(inputWidth - 1, inputHeight - 1));
+    outputTexture.write(inputTexture.read(source, parameters.inputSlice), gid, parameters.outputSlice);
 }

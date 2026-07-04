@@ -16,6 +16,9 @@ kernel void nearestNeighborUpScale(
 ) {
     ushort2 inputSize = ushort2(inputTexture.get_width(), inputTexture.get_height());
     ushort2 outputSize = ushort2(outputTexture.get_width(), outputTexture.get_height());
+    if (gid.x >= outputSize.x || gid.y >= outputSize.y) {
+        return;
+    }
 
     ushort2 scale = outputSize / inputSize;
     outputTexture.write(inputTexture.read(gid / scale), gid);

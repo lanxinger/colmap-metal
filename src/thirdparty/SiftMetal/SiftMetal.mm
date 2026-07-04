@@ -97,6 +97,34 @@ struct Octave {
   id<MTLTexture> convWorkTexture; // private storage 2DArray[1]
 };
 
+static bool OctaveResourcesReady(const Octave& oct) {
+  if (!oct.gaussianTextures || !oct.differenceTextures ||
+      !oct.gradientTextures || !oct.convWorkTexture ||
+      !oct.extremaOutputBuffer || !oct.extremaIndexBuffer ||
+      !oct.extremaParamsBuffer || !oct.interpolateInputBuffer ||
+      !oct.interpolateOutputBuffer || !oct.interpolateParamsBuffer ||
+      !oct.orientationInputBuffer || !oct.orientationOutputBuffer ||
+      !oct.orientationParamsBuffer || !oct.descriptorInputBuffer ||
+      !oct.descriptorOutputBuffer || !oct.descriptorParamsBuffer) {
+    return false;
+  }
+  for (const auto& pair : oct.convPairs) {
+    if (!pair.paramsX || !pair.paramsY) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool OctavesResourcesReady(const std::vector<Octave>& octaves) {
+  for (const auto& oct : octaves) {
+    if (!OctaveResourcesReady(oct)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // SiftMetalExtractorImpl
 // ---------------------------------------------------------------------------
@@ -723,9 +751,17 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   uploadBuffer_ =
       [device_ newBufferWithLength:maxPixels * sizeof(float)
                            options:MTLResourceStorageModeShared];
+  if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
+      !seedConvWorkTexture_ || !seedConvWeightsBuffer_ ||
+      !seedConvParamsBuffer_ || !uploadBuffer_) {
+    return false;
+  }
 
   // Setup octaves.
   SetupOctaves(max_w, max_h);
+  if (!OctavesResourcesReady(octaves_)) {
+    return false;
+  }
 
   return true;
 }
@@ -888,6 +924,10 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                                       ExtractResult* result) {
+  if (!data || !result || w <= 0 || h <= 0) {
+    return false;
+  }
+
   result->keypoints.clear();
   result->descriptors.clear();
 
@@ -917,8 +957,19 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
           [device_ newBufferWithLength:maxPixels * sizeof(float)
                                options:MTLResourceStorageModeShared];
     }
+    if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
+        !seedConvWorkTexture_ || !uploadBuffer_) {
+      return false;
+    }
 
     SetupOctaves(w, h);
+    if (!OctavesResourcesReady(octaves_)) {
+      return false;
+    }
+  }
+
+  if (octaves_.empty()) {
+    return true;
   }
 
   // Convert uint8 grayscale to float and upload to luminosity texture.
@@ -1315,7 +1366,6 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
       oct.orientationInputBuffer.contents);
 
   int validCount = 0;
-  std::vector<int> validIndices;
   const int num_keypoints = static_cast<int>(keypoints.size());
   for (int k = 0; k < num_keypoints && validCount < keypoint_capacity_; ++k) {
     const auto& kp = keypoints[k];
@@ -1345,7 +1395,6 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
     orientIn[validCount].absoluteY = static_cast<int32_t>(kp.y);
     orientIn[validCount].scale = static_cast<int32_t>(scaleIdx);
     orientIn[validCount].sigma = kp.sigma;
-    validIndices.push_back(k);
     ++validCount;
   }
 

@@ -65,6 +65,20 @@ static bool RejectByGuidedGeometry(
   return true;
 }
 
+static bool AcceptDotProductMatch(float bestScore,
+                                  float secondBestScore,
+                                  constant SIFTMatcherParameters& params) {
+  const float bestDist =
+      acos(min(bestScore * kInvSqSiftDescriptorNorm, 1.0f));
+  if (bestDist > params.maxDistance) {
+    return false;
+  }
+
+  const float secondBestDist =
+      acos(min(secondBestScore * kInvSqSiftDescriptorNorm, 1.0f));
+  return bestDist < params.maxRatio * secondBestDist;
+}
+
 kernel void siftMatchBest(
     const device uchar* descriptors1 [[buffer(0)]],
     const device uchar* descriptors2 [[buffer(1)]],
@@ -149,12 +163,7 @@ kernel void siftMatchBest(
     accepted = bestScore <= params.maxL2Distance &&
                bestScore < params.maxRatioSquared * secondBestScore;
   } else if (accepted) {
-    const float bestDist =
-        acos(min(bestScore * kInvSqSiftDescriptorNorm, 1.0f));
-    const float secondBestDist =
-        acos(min(secondBestScore * kInvSqSiftDescriptorNorm, 1.0f));
-    accepted = bestDist <= params.maxDistance &&
-               bestDist < params.maxRatio * secondBestDist;
+    accepted = AcceptDotProductMatch(bestScore, secondBestScore, params);
   }
 
   results[gid].index = accepted ? bestIdx : -1;
@@ -259,12 +268,7 @@ kernel void siftMatchBestDotParallel(
 
   bool accepted = bestIdx >= 0;
   if (accepted) {
-    const float bestDist =
-        acos(min(bestScore * kInvSqSiftDescriptorNorm, 1.0f));
-    const float secondBestDist =
-        acos(min(secondBestScore * kInvSqSiftDescriptorNorm, 1.0f));
-    accepted = bestDist <= params.maxDistance &&
-               bestDist < params.maxRatio * secondBestDist;
+    accepted = AcceptDotProductMatch(bestScore, secondBestScore, params);
   }
 
   results[gid].index = accepted ? bestIdx : -1;

@@ -669,7 +669,10 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   siftDescriptorsPipeline_ =
       MakePipeline(device_, library_, "siftDescriptors");
 
-  if (!bilinearUpScalePipeline_ || !subtractPipeline_ ||
+  if (!bilinearUpScalePipeline_ || !nearestNeighborDownScalePipeline_ ||
+      !convolutionXPipeline_ || !convolutionYPipeline_ ||
+      !convolutionSeriesXPipeline_ || !convolutionSeriesYPipeline_ ||
+      !subtractPipeline_ || !siftGradientPipeline_ ||
       !siftExtremaListPipeline_ || !siftInterpolatePipeline_ ||
       !siftOrientationPipeline_ || !siftDescriptorsPipeline_) {
     return false;

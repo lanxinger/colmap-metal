@@ -733,7 +733,7 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   if (max_w <= 0 || max_h <= 0 || opts.first_octave < -1 ||
-      opts.scales_per_octave <= 0 || opts.max_num_features < 0 ||
+      opts.scales_per_octave <= 0 || opts.max_num_features <= 0 ||
       !std::isfinite(opts.peak_threshold) || opts.peak_threshold <= 0.0f ||
       !std::isfinite(opts.edge_threshold) || opts.edge_threshold <= 0.0f ||
       (!opts.upright && opts.max_num_orientations <= 0)) {
@@ -741,9 +741,7 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   }
 
   options_ = opts;
-  const int max_num_features =
-      options_.max_num_features > 0 ? options_.max_num_features
-                                    : kMinDescriptorCapacity;
+  const int max_num_features = options_.max_num_features;
   const int max_num_orientations =
       options_.upright ? 1 : std::max(1, options_.max_num_orientations);
   const int64_t requested_descriptors =

@@ -35,7 +35,7 @@ struct Options {
   float peak_threshold = 0.0133f;
   // Edge threshold (ratio of principal curvatures).
   float edge_threshold = 10.0f;
-  // Maximum number of features to retain (0 = unlimited).
+  // Maximum number of features to retain. Must be positive.
   int max_num_features = 8192;
   // Maximum number of orientations per keypoint.
   int max_num_orientations = 2;

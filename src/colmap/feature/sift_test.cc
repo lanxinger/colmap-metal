@@ -40,6 +40,9 @@
 #include "colmap/geometry/essential_matrix.h"
 #include "colmap/math/random.h"
 #include "colmap/util/opengl_utils.h"
+#if defined(COLMAP_METAL_ENABLED)
+#include "thirdparty/SiftMetal/SiftMetal.h"
+#endif
 
 #include <functional>
 
@@ -225,6 +228,16 @@ TEST(ExtractSiftFeaturesGPU, Nominal) {
 #endif
   });
 }
+
+#if defined(COLMAP_METAL_ENABLED)
+TEST(ExtractSiftFeaturesMetal, RejectsNonPositiveFeatureLimit) {
+  sift_metal::Options options;
+  options.max_num_features = 0;
+
+  sift_metal::SiftMetalExtractor extractor;
+  EXPECT_FALSE(extractor.Init(options, 256, 256));
+}
+#endif
 
 FeatureDescriptors CreateRandomFeatureDescriptors(const size_t num_features) {
   SetPRNGSeed(0);

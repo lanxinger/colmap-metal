@@ -183,6 +183,7 @@ kernel void siftMatchBestDotParallel(
   threadgroup float secondBestScores[SIFT_MATCHER_DOT_THREADS];
   threadgroup int bestIndices[SIFT_MATCHER_DOT_THREADS];
   threadgroup int secondBestIndices[SIFT_MATCHER_DOT_THREADS];
+  threadgroup uchar descriptor1[SIFT_MATCHER_DESCRIPTOR_DIM];
 
   float localBestScore = 0.0f;
   float localSecondBestScore = 0.0f;
@@ -190,13 +191,18 @@ kernel void siftMatchBestDotParallel(
   int localSecondBestIdx = -1;
 
   const uint desc1Offset = gid * SIFT_MATCHER_DESCRIPTOR_DIM;
+  for (uint k = tid; k < SIFT_MATCHER_DESCRIPTOR_DIM;
+       k += threadsPerThreadgroup) {
+    descriptor1[k] = descriptors1[desc1Offset + k];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
   for (uint idx2 = tid; idx2 < params.numDescriptors2;
        idx2 += threadsPerThreadgroup) {
     const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
     int score = 0;
     for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
-      score += int(descriptors1[desc1Offset + k]) *
-               int(descriptors2[desc2Offset + k]);
+      score += int(descriptor1[k]) * int(descriptors2[desc2Offset + k]);
     }
 
     const float scoref = float(score);

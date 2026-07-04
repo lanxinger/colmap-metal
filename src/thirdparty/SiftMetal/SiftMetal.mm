@@ -1643,6 +1643,22 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
     if (!dr.valid) continue;
 
     int kpIdx = oriented[i].first;
+    if (kpIdx < 0 || kpIdx >= static_cast<int>(keypoints.size()) ||
+        dr.keypoint != kpIdx || !std::isfinite(dr.theta)) {
+      continue;
+    }
+
+    bool valid_descriptor = true;
+    for (int j = 0; j < 128; ++j) {
+      if (dr.features[j] < 0 || dr.features[j] > 255) {
+        valid_descriptor = false;
+        break;
+      }
+    }
+    if (!valid_descriptor) {
+      continue;
+    }
+
     const auto& kp = keypoints[kpIdx];
 
     Keypoint finalKp;

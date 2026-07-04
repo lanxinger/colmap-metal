@@ -400,8 +400,16 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
 
   const size_t descriptor_bytes =
       static_cast<size_t>(num_descriptors) * SIFT_MATCHER_DESCRIPTOR_DIM;
-  const uint64_t content_hash =
-      HashDescriptorBytes(descriptors, descriptor_bytes);
+  uint64_t content_hash = 0;
+  bool has_content_hash = false;
+  const auto get_content_hash = [&]() {
+    if (!has_content_hash) {
+      content_hash = HashDescriptorBytes(descriptors, descriptor_bytes);
+      has_content_hash = true;
+    }
+    return content_hash;
+  };
+
   ++descriptor_buffer_cache_tick_;
   for (auto it = descriptor_buffer_cache_.begin();
        it != descriptor_buffer_cache_.end();
@@ -409,7 +417,7 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
     auto& entry = *it;
     if (entry.descriptors == descriptors &&
         entry.num_descriptors == num_descriptors) {
-      if (entry.content_hash != content_hash) {
+      if (entry.content_hash != get_content_hash()) {
         descriptor_buffer_cache_bytes_ -= entry.byte_size;
         descriptor_buffer_cache_.erase(it);
         break;
@@ -437,7 +445,7 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
       descriptors,
       num_descriptors,
       descriptor_bytes,
-      content_hash,
+      get_content_hash(),
       descriptor_buffer_cache_tick_,
       buffer});
   descriptor_buffer_cache_bytes_ += descriptor_bytes;

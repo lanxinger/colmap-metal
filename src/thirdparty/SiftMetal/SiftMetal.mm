@@ -550,6 +550,12 @@ bool SiftMetalMatcherImpl::Match(
     const MatchOptions& options, MatchGuidedGeometry guided_geometry,
     const float matrix[9], float max_residual,
     std::vector<MatchResult>* matches) {
+  if (!matches || num_descriptors1 < 0 || num_descriptors2 < 0 ||
+      (num_descriptors1 > 0 && !descriptors1) ||
+      (num_descriptors2 > 0 && !descriptors2)) {
+    return false;
+  }
+
   matches->clear();
   if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {
     return true;

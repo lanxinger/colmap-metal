@@ -163,6 +163,10 @@ kernel void siftDescriptors(
     const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
     
     const float tau = 2 * M_PI_F;
+    if (!isfinite(input.theta)) {
+        results[gid] = result;
+        return;
+    }
     const float cosT = cos(input.theta);
     const float sinT = sin(input.theta);
     const float binsPerRadian = (float)bins / tau;
@@ -202,8 +206,14 @@ kernel void siftDescriptors(
             float ry = ((float)j * sinT + (float)i * cosT) / histogramWidth;
             float bx = rx + (float)(d / 2) - 0.5;
             float by = ry + (float)(d / 2) - 0.5;
+            if (!isfinite(bx) || !isfinite(by)) {
+                continue;
+            }
             
             float2 g = gradientTextures.read(ushort2(px + j, py + i), input.scale).rg;
+            if (!all(isfinite(g)) || g.g <= 0.0f) {
+                continue;
+            }
             float orientation = g.r - input.theta;
             float magnitude = g.g;
             while (orientation < 0) {
@@ -215,11 +225,17 @@ kernel void siftDescriptors(
 
             // Bin
             float bin = orientation * binsPerRadian;
+            if (!isfinite(bin)) {
+                continue;
+            }
 
             // Total contribution
             float exponentNumerator = rx * rx + ry * ry;
             float w = exp(-exponentNumerator / exponentDenominator);
             float value = magnitude * w;
+            if (!isfinite(value) || value <= 0.0f) {
+                continue;
+            }
             
             addFeature(features, bx, by, bin, value);
         }

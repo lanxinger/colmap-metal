@@ -812,13 +812,12 @@ void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
     num_octaves = std::max(1, num_octaves);
   }
 
-  octaves_.resize(num_octaves);
+  octaves_.clear();
   for (int o = 0; o < num_octaves; ++o) {
     float delta = delta_min_ * std::pow(2.0f, float(o));
     int ow = static_cast<int>(float(w) / delta);
     int oh = static_cast<int>(float(h) / delta);
     if (ow < 8 || oh < 8) {
-      octaves_.resize(o);
       break;
     }
 
@@ -830,7 +829,8 @@ void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
       sigmas.push_back(ratio * sigma_min_ * scale);
     }
 
-    SetupOctave(octaves_[o], o, delta, ow, oh, ns, sigmas);
+    octaves_.emplace_back();
+    SetupOctave(octaves_.back(), o, delta, ow, oh, ns, sigmas);
   }
 }
 

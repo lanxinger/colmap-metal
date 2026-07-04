@@ -1393,9 +1393,10 @@ bool SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
 // ---------------------------------------------------------------------------
 int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
   auto* idx = static_cast<uint32_t*>(oct.extremaIndexBuffer.contents);
-  int count = static_cast<int>(*idx);
+  const uint32_t count = *idx;
   *idx = 0;
-  return count;
+  return static_cast<int>(
+      std::min<uint32_t>(count, static_cast<uint32_t>(extrema_capacity_)));
 }
 
 // ---------------------------------------------------------------------------

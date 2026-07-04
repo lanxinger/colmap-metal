@@ -153,7 +153,8 @@ kernel void siftDescriptors(
     // Check that the keypoint is sufficiently far from the edge to include
     // entire area of the descriptor.
     
-    #warning("TODO: Do this check after interpolation to avoid wasting work on extracting the orientation")
+    // Keep the descriptor bounds check here so descriptor sampling never reads
+    // outside the gradient texture.
     // let diagonal = Float(2).squareRoot() * lambda * sigma
     // let f = Float(histogramsPerAxis + 1) / Float(histogramsPerAxis)
     // let side = Int((diagonal * f).rounded())

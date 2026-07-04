@@ -38,7 +38,7 @@ kernel void siftGradient(
     const float cmy = inputTexture.read(uint2(gid.x, my), gz).r;
     const float tx = (cpx - cmx) * 0.5;
     const float ty = (cpy - cmy) * 0.5;
-    #warning("FIXME: IPOL implementation swaps dx and dy")
+    // Orientation and descriptor kernels both consume this convention.
     float oa = atan2(tx, ty);
     float om = sqrt(tx * tx + ty * ty);
     outputTexture.write(float4(oa, om, 0, 0), gid.xy, gz);

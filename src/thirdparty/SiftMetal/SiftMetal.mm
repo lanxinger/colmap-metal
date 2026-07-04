@@ -313,6 +313,9 @@ class SiftMetalMatcherImpl {
 
   id<MTLBuffer> GetDescriptorBuffer(const uint8_t* descriptors,
                                     int num_descriptors);
+  id<MTLBuffer> GetKeypointBuffer(bool first_buffer,
+                                  const MatchKeypoint* keypoints,
+                                  int num_keypoints);
   void EvictDescriptorBuffers();
 
   struct DescriptorBufferCacheEntry {
@@ -333,6 +336,10 @@ class SiftMetalMatcherImpl {
   id<MTLBuffer> paramsBuffer_;
   id<MTLBuffer> resultsBuffer_;
   size_t resultsBufferCapacity_ = 0;
+  id<MTLBuffer> keypoints1Buffer_;
+  id<MTLBuffer> keypoints2Buffer_;
+  size_t keypoints1BufferCapacity_ = 0;
+  size_t keypoints2BufferCapacity_ = 0;
   std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
   size_t descriptor_buffer_cache_bytes_ = 0;
   uint64_t descriptor_buffer_cache_tick_ = 0;
@@ -456,6 +463,38 @@ void SiftMetalMatcherImpl::EvictDescriptorBuffers() {
   }
 }
 
+id<MTLBuffer> SiftMetalMatcherImpl::GetKeypointBuffer(
+    bool first_buffer, const MatchKeypoint* keypoints, int num_keypoints) {
+  if (!keypoints || num_keypoints <= 0) {
+    return nil;
+  }
+
+  id<MTLBuffer> buffer =
+      first_buffer ? keypoints1Buffer_ : keypoints2Buffer_;
+  size_t capacity =
+      first_buffer ? keypoints1BufferCapacity_ : keypoints2BufferCapacity_;
+  const size_t keypoint_bytes =
+      static_cast<size_t>(num_keypoints) * sizeof(SIFTMatcherKeypoint);
+  if (!buffer || capacity < keypoint_bytes) {
+    buffer = [device_ newBufferWithLength:keypoint_bytes
+                                  options:MTLResourceStorageModeShared];
+    capacity = buffer ? keypoint_bytes : 0;
+    if (first_buffer) {
+      keypoints1Buffer_ = buffer;
+      keypoints1BufferCapacity_ = capacity;
+    } else {
+      keypoints2Buffer_ = buffer;
+      keypoints2BufferCapacity_ = capacity;
+    }
+  }
+  if (!buffer) {
+    return nil;
+  }
+
+  std::memcpy(buffer.contents, keypoints, keypoint_bytes);
+  return buffer;
+}
+
 bool SiftMetalMatcherImpl::RunOneWay(
     const uint8_t* descriptors1, int num_descriptors1,
     const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
@@ -492,15 +531,9 @@ bool SiftMetalMatcherImpl::RunOneWay(
       return false;
     }
     keypoints1Buffer =
-        [device_ newBufferWithBytes:keypoints1
-                             length:static_cast<size_t>(num_descriptors1) *
-                                    sizeof(SIFTMatcherKeypoint)
-                            options:MTLResourceStorageModeShared];
+        GetKeypointBuffer(/*first_buffer=*/true, keypoints1, num_descriptors1);
     keypoints2Buffer =
-        [device_ newBufferWithBytes:keypoints2
-                             length:static_cast<size_t>(num_descriptors2) *
-                                    sizeof(SIFTMatcherKeypoint)
-                            options:MTLResourceStorageModeShared];
+        GetKeypointBuffer(/*first_buffer=*/false, keypoints2, num_descriptors2);
   } else {
     keypoints1Buffer = dummyKeypointBuffer_;
     keypoints2Buffer = dummyKeypointBuffer_;

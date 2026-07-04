@@ -330,6 +330,9 @@ class SiftMetalMatcherImpl {
   id<MTLComputePipelineState> siftMatchBestPipeline_;
   id<MTLComputePipelineState> siftMatchBestDotParallelPipeline_;
   id<MTLBuffer> dummyKeypointBuffer_;
+  id<MTLBuffer> paramsBuffer_;
+  id<MTLBuffer> resultsBuffer_;
+  size_t resultsBufferCapacity_ = 0;
   std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
   size_t descriptor_buffer_cache_bytes_ = 0;
   uint64_t descriptor_buffer_cache_tick_ = 0;
@@ -523,18 +526,21 @@ bool SiftMetalMatcherImpl::RunOneWay(
     std::memcpy(params.matrix, matrix, 9 * sizeof(float));
   }
 
-  id<MTLBuffer> paramsBuffer =
-      [device_ newBufferWithBytes:&params
-                           length:sizeof(params)
-                          options:MTLResourceStorageModeShared];
+  if (!paramsBuffer_) {
+    paramsBuffer_ = [device_ newBufferWithLength:sizeof(params)
+                                         options:MTLResourceStorageModeShared];
+  }
   const size_t result_bytes =
       static_cast<size_t>(num_descriptors1) * sizeof(SIFTMatcherResult);
-  id<MTLBuffer> resultsBuffer =
-      [device_ newBufferWithLength:result_bytes
-                            options:MTLResourceStorageModeShared];
-  if (!paramsBuffer || !resultsBuffer) {
+  if (!resultsBuffer_ || resultsBufferCapacity_ < result_bytes) {
+    resultsBuffer_ = [device_ newBufferWithLength:result_bytes
+                                          options:MTLResourceStorageModeShared];
+    resultsBufferCapacity_ = resultsBuffer_ ? result_bytes : 0;
+  }
+  if (!paramsBuffer_ || !resultsBuffer_) {
     return false;
   }
+  std::memcpy(paramsBuffer_.contents, &params, sizeof(params));
 
   id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
   if (!commandBuffer) {
@@ -550,8 +556,8 @@ bool SiftMetalMatcherImpl::RunOneWay(
   [encoder setBuffer:descriptors2Buffer offset:0 atIndex:1];
   [encoder setBuffer:keypoints1Buffer offset:0 atIndex:2];
   [encoder setBuffer:keypoints2Buffer offset:0 atIndex:3];
-  [encoder setBuffer:paramsBuffer offset:0 atIndex:4];
-  [encoder setBuffer:resultsBuffer offset:0 atIndex:5];
+  [encoder setBuffer:paramsBuffer_ offset:0 atIndex:4];
+  [encoder setBuffer:resultsBuffer_ offset:0 atIndex:5];
   if (use_parallel_dot_pipeline) {
     const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
         pipeline.maxTotalThreadsPerThreadgroup, SIFT_MATCHER_DOT_THREADS);
@@ -569,7 +575,7 @@ bool SiftMetalMatcherImpl::RunOneWay(
   }
 
   results->resize(num_descriptors1);
-  std::memcpy(results->data(), resultsBuffer.contents, result_bytes);
+  std::memcpy(results->data(), resultsBuffer_.contents, result_bytes);
   return true;
 }
 

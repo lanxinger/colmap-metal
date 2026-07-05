@@ -237,6 +237,14 @@ TEST(ExtractSiftFeaturesMetal, RejectsNonPositiveFeatureLimit) {
   sift_metal::SiftMetalExtractor extractor;
   EXPECT_FALSE(extractor.Init(options, 256, 256));
 }
+
+TEST(ExtractSiftFeaturesMetal, RejectsUnsupportedFirstOctave) {
+  sift_metal::Options options;
+  options.first_octave = 1;
+
+  sift_metal::SiftMetalExtractor extractor;
+  EXPECT_FALSE(extractor.Init(options, 256, 256));
+}
 #endif
 
 FeatureDescriptors CreateRandomFeatureDescriptors(const size_t num_features) {

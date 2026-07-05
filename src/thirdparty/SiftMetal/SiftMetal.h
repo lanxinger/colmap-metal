@@ -29,7 +29,7 @@ struct Options {
   int num_octaves = -1;
   // Number of scales per octave.
   int scales_per_octave = 3;
-  // First octave index. -1 means 2x upscaling of input.
+  // First octave index. Supported values are -1 (2x upscaling) and 0.
   int first_octave = -1;
   // Peak threshold for DoG detection.
   float peak_threshold = 0.0133f;

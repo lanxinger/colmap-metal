@@ -340,6 +340,8 @@ class SiftMetalMatcherImpl {
   id<MTLBuffer> keypoints2Buffer_;
   size_t keypoints1BufferCapacity_ = 0;
   size_t keypoints2BufferCapacity_ = 0;
+  std::vector<SIFTMatcherResult> matches_1to2_;
+  std::vector<SIFTMatcherResult> matches_2to1_;
   std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
   size_t descriptor_buffer_cache_bytes_ = 0;
   uint64_t descriptor_buffer_cache_tick_ = 0;
@@ -654,33 +656,31 @@ bool SiftMetalMatcherImpl::Match(
     return true;
   }
 
-  std::vector<SIFTMatcherResult> matches_1to2;
   if (!RunOneWay(descriptors1, num_descriptors1, keypoints1,
                  descriptors2, num_descriptors2, keypoints2, options,
                  guided_geometry, matrix, max_residual,
-                 /*reverse_guided=*/false, &matches_1to2)) {
+                 /*reverse_guided=*/false, &matches_1to2_)) {
     return false;
   }
 
-  std::vector<SIFTMatcherResult> matches_2to1;
   if (options.cross_check) {
     if (!RunOneWay(descriptors2, num_descriptors2, keypoints2,
                    descriptors1, num_descriptors1, keypoints1, options,
                    guided_geometry, matrix, max_residual,
-                   /*reverse_guided=*/true, &matches_2to1)) {
+                   /*reverse_guided=*/true, &matches_2to1_)) {
       return false;
     }
   }
 
   matches->reserve(num_descriptors1);
   for (int i1 = 0; i1 < num_descriptors1; ++i1) {
-    const int i2 = matches_1to2[i1].index;
+    const int i2 = matches_1to2_[i1].index;
     if (i2 < 0 || i2 >= num_descriptors2) {
       continue;
     }
     if (options.cross_check &&
-        (i2 >= static_cast<int>(matches_2to1.size()) ||
-         matches_2to1[i2].index != i1)) {
+        (i2 >= static_cast<int>(matches_2to1_.size()) ||
+         matches_2to1_[i2].index != i1)) {
       continue;
     }
     matches->push_back(

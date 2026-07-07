@@ -67,7 +67,6 @@ struct Octave {
 
   id<MTLTexture> gaussianTextures = nil;   // 2DArray [num_scales+3]
   id<MTLTexture> differenceTextures = nil; // 2DArray [num_scales+2]
-  id<MTLTexture> gradientTextures = nil;   // 2DArray, rg32Float
   id<MTLBuffer> downscaleParamsBuffer = nil;
 
   // Buffers for extrema detection
@@ -107,8 +106,7 @@ struct DetectedKeypoint {
 
 static bool OctaveResourcesReady(const Octave& oct) {
   if (!oct.gaussianTextures || !oct.differenceTextures ||
-      !oct.gradientTextures || !oct.downscaleParamsBuffer ||
-      !oct.convWorkTexture ||
+      !oct.downscaleParamsBuffer || !oct.convWorkTexture ||
       !oct.extremaOutputBuffer || !oct.extremaIndexBuffer ||
       !oct.extremaParamsBuffer || !oct.interpolateInputBuffer ||
       !oct.interpolateOutputBuffer || !oct.interpolateParamsBuffer ||
@@ -154,7 +152,6 @@ class SiftMetalExtractorImpl {
                     id<MTLTexture> inputTexture, bool inputIs2D);
   bool EncodeGaussianSeries(id<MTLCommandBuffer> cb, Octave& oct);
   bool EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct);
-  bool EncodeGradients(id<MTLCommandBuffer> cb, Octave& oct);
   bool EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct);
 
   // Per-octave extraction
@@ -181,7 +178,6 @@ class SiftMetalExtractorImpl {
   id<MTLComputePipelineState> convolutionSeriesXPipeline_;
   id<MTLComputePipelineState> convolutionSeriesYPipeline_;
   id<MTLComputePipelineState> subtractPipeline_;
-  id<MTLComputePipelineState> siftGradientPipeline_;
   id<MTLComputePipelineState> siftExtremaListPipeline_;
   id<MTLComputePipelineState> siftInterpolatePipeline_;
   id<MTLComputePipelineState> siftOrientationPipeline_;
@@ -811,7 +807,6 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   convolutionSeriesYPipeline_ =
       MakePipeline(device_, library_, "convolutionSeriesY");
   subtractPipeline_ = MakePipeline(device_, library_, "subtract");
-  siftGradientPipeline_ = MakePipeline(device_, library_, "siftGradient");
   siftExtremaListPipeline_ =
       MakePipeline(device_, library_, "siftExtremaList");
   siftInterpolatePipeline_ =
@@ -824,7 +819,7 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   if (!bilinearUpScalePipeline_ || !nearestNeighborDownScalePipeline_ ||
       !convolutionXPipeline_ || !convolutionYPipeline_ ||
       !convolutionSeriesXPipeline_ || !convolutionSeriesYPipeline_ ||
-      !subtractPipeline_ || !siftGradientPipeline_ ||
+      !subtractPipeline_ ||
       !siftExtremaListPipeline_ || !siftInterpolatePipeline_ ||
       !siftOrientationPipeline_ || !siftDescriptorsPipeline_) {
     return false;
@@ -950,9 +945,6 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
       MTLStorageModePrivate);
   oct.differenceTextures = MakeTexture2DArray(
       device_, w, h, numDifferences, MTLPixelFormatR32Float,
-      MTLStorageModePrivate);
-  oct.gradientTextures = MakeTexture2DArray(
-      device_, w, h, numGaussians, MTLPixelFormatRG32Float,
       MTLStorageModePrivate);
   NearestNeighborScaleParameters downscale_params = {};
   downscale_params.inputSlice = static_cast<int32_t>(num_scales);
@@ -1111,7 +1103,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                           withBytes:data
                         bytesPerRow:w];
 
-  // Phase 1: Build scale-space pyramid (DoG + gradients + extrema).
+  // Phase 1: Build scale-space pyramid (DoG + extrema).
   {
     id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
     if (!cb) {
@@ -1349,11 +1341,8 @@ bool SiftMetalExtractorImpl::EncodeOctave(id<MTLCommandBuffer> cb,
   if (!EncodeDifferences(cb, oct)) {
     return false;
   }
-  // Gradients.
-  if (!EncodeGradients(cb, oct)) {
-    return false;
-  }
-  // Extrema detection.
+  // Extrema detection. Gradients are computed on the fly by the orientation
+  // and descriptor kernels from the Gaussian textures.
   return EncodeExtrema(cb, oct);
 }
 
@@ -1413,28 +1402,6 @@ bool SiftMetalExtractorImpl::EncodeDifferences(id<MTLCommandBuffer> cb,
   MTLSize grid = {(NSUInteger)(w + 7) / 8,
                   (NSUInteger)(h + 7) / 8,
                   (NSUInteger)(numDiff + 7) / 8};
-  [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
-  [enc endEncoding];
-  return true;
-}
-
-bool SiftMetalExtractorImpl::EncodeGradients(id<MTLCommandBuffer> cb,
-                                               Octave& oct) {
-  int w = oct.width;
-  int h = oct.height;
-  int arrayLen = oct.num_scales + 3;
-
-  id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-  if (!enc) {
-    return false;
-  }
-  [enc setComputePipelineState:siftGradientPipeline_];
-  [enc setTexture:oct.gradientTextures atIndex:0];
-  [enc setTexture:oct.gaussianTextures atIndex:1];
-  MTLSize tg = {8, 8, 8};
-  MTLSize grid = {(NSUInteger)(w + 7) / 8,
-                  (NSUInteger)(h + 7) / 8,
-                  (NSUInteger)(arrayLen + 7) / 8};
   [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
   [enc endEncoding];
   return true;
@@ -1598,7 +1565,7 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
   [enc setBuffer:oct.orientationOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.orientationInputBuffer offset:0 atIndex:1];
   [enc setBuffer:oct.orientationParamsBuffer offset:0 atIndex:2];
-  [enc setTexture:oct.gradientTextures atIndex:0];
+  [enc setTexture:oct.gaussianTextures atIndex:0];
 
   NSUInteger maxThreads =
       siftOrientationPipeline_.maxTotalThreadsPerThreadgroup;
@@ -1682,7 +1649,7 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
   [enc setBuffer:oct.descriptorOutputBuffer offset:0 atIndex:0];
   [enc setBuffer:oct.descriptorInputBuffer offset:0 atIndex:1];
   [enc setBuffer:oct.descriptorParamsBuffer offset:0 atIndex:2];
-  [enc setTexture:oct.gradientTextures atIndex:0];
+  [enc setTexture:oct.gaussianTextures atIndex:0];
 
   NSUInteger maxThreads =
       siftDescriptorsPipeline_.maxTotalThreadsPerThreadgroup;

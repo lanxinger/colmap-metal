@@ -7,6 +7,7 @@
 
 #include <metal_stdlib>
 
+#include "Common.hpp"
 #include "../include/SIFTDescriptor.h"
 
 using namespace metal;
@@ -128,7 +129,7 @@ kernel void siftDescriptors(
     device SIFTDescriptorResult * results [[buffer(0)]],
     device SIFTDescriptorInput * inputs [[buffer(1)]],
     device SIFTDescriptorParameters & parameters [[buffer(2)]],
-    texture2d_array<float, access::read> gradientTextures [[texture(0)]],
+    texture2d_array<float, access::read> gaussianTextures [[texture(0)]],
     uint gid [[thread_position_in_grid]]
 ) {
    
@@ -215,8 +216,8 @@ kernel void siftDescriptors(
                 continue;
             }
             
-            float2 g = gradientTextures.read(
-                uint2(uint(sampleX), uint(sampleY)), input.scale).rg;
+            float2 g = siftGradientAt(
+                gaussianTextures, sampleX, sampleY, uint(input.scale));
             if (!all(isfinite(g)) || g.g <= 0.0f) {
                 continue;
             }

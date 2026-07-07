@@ -12,7 +12,6 @@ set(METAL_SHADERS
     ${SIFT_METAL_SHADER_DIR}/NearestNeighborDownScale.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTDescriptor.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTExtrema.metal
-    ${SIFT_METAL_SHADER_DIR}/SIFTGradient.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTInterpolate.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTMatcher.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTOrientation.metal

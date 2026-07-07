@@ -21,6 +21,32 @@ static inline int symmetrizedCoordinates(int i, int l) {
     return i;
 }
 
+// Computes the SIFT gradient (orientation, magnitude) at a pixel of a
+// Gaussian scale-space slice, using the same central differences and
+// atan2(tx, ty) convention the orientation and descriptor kernels consume.
+// Computing this on the fly is cheaper than precomputing gradients for the
+// whole pyramid: only small windows around keypoints are ever sampled.
+static inline float2 siftGradientAt(
+    texture2d_array<float, access::read> tex,
+    int x,
+    int y,
+    uint slice
+) {
+    const int w = tex.get_width();
+    const int h = tex.get_height();
+    const uint px = uint(symmetrizedCoordinates(x + 1, w));
+    const uint mx = uint(symmetrizedCoordinates(x - 1, w));
+    const uint py = uint(symmetrizedCoordinates(y + 1, h));
+    const uint my = uint(symmetrizedCoordinates(y - 1, h));
+    const float cpx = tex.read(uint2(px, uint(y)), slice).r;
+    const float cmx = tex.read(uint2(mx, uint(y)), slice).r;
+    const float cpy = tex.read(uint2(uint(x), py), slice).r;
+    const float cmy = tex.read(uint2(uint(x), my), slice).r;
+    const float tx = (cpx - cmx) * 0.5;
+    const float ty = (cpy - cmy) * 0.5;
+    return float2(atan2(tx, ty), sqrt(tx * tx + ty * ty));
+}
+
 //constant float3x3 identity = float3x3(
 //    float3(1, 0, 0),
 //    float3(0, 1, 0),

@@ -88,7 +88,7 @@ void smoothHistogram(
 
 
 void getOrientationsHistogram(
-    texture2d_array<float, access::read> g,
+    texture2d_array<float, access::read> gaussianTextures,
     float absoluteX,
     float absoluteY,
     int scale,
@@ -116,8 +116,10 @@ void getOrientationsHistogram(
             float r2 = u * u + v * v;
             float w = exp(-r2 / exponentDenominator);
 
-            // Gradient orientation
-            float2 gradient = g.read(uint2(uint(x + i), uint(y + j)), scale).rg;
+            // Gradient orientation, computed on the fly from the
+            // Gaussian scale-space image.
+            float2 gradient =
+                siftGradientAt(gaussianTextures, x + i, y + j, uint(scale));
             float orientation = gradient.x;
             float magnitude = gradient.y;
             
@@ -144,7 +146,7 @@ kernel void siftOrientation(
     device SIFTOrientationResult * results [[buffer(0)]],
     device SIFTOrientationKeypoint * keypoints [[buffer(1)]],
     device SIFTOrientationParameters & parameters [[buffer(2)]],
-    texture2d_array<float, access::read> gradientTextures [[texture(0)]],
+    texture2d_array<float, access::read> gaussianTextures [[texture(0)]],
     uint gid [[thread_position_in_grid]]
 ) {
     const int bins = SIFT_ORIENTATION_HISTOGRAM_BINS;
@@ -158,7 +160,7 @@ kernel void siftOrientation(
     }
     
     getOrientationsHistogram(
-        gradientTextures,
+        gaussianTextures,
         keypoint.absoluteX,
         keypoint.absoluteY,
         keypoint.scale,

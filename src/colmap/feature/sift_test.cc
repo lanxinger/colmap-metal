@@ -286,6 +286,24 @@ TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
                              options,
                              &matches));
   EXPECT_TRUE(matches.empty());
+
+  matches = {{0, 0}};
+  options.max_ratio = 0.8f;
+  const std::array<float, 9> identity = {1.0f, 0.0f, 0.0f,
+                                         0.0f, 1.0f, 0.0f,
+                                         0.0f, 0.0f, 1.0f};
+  EXPECT_FALSE(matcher.MatchGuided(descriptor.data(),
+                                   1,
+                                   nullptr,
+                                   descriptor.data(),
+                                   1,
+                                   nullptr,
+                                   options,
+                                   sift_metal::MatchGuidedGeometry::HOMOGRAPHY,
+                                   identity.data(),
+                                   1.0f,
+                                   &matches));
+  EXPECT_TRUE(matches.empty());
 }
 #endif
 

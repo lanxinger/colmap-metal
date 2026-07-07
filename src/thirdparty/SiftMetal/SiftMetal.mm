@@ -649,6 +649,10 @@ bool SiftMetalMatcherImpl::Match(
     return false;
   }
   if (guided_geometry != MatchGuidedGeometry::NONE) {
+    if (num_descriptors1 > 0 && num_descriptors2 > 0 &&
+        (!keypoints1 || !keypoints2)) {
+      return false;
+    }
     for (int i = 0; i < 9; ++i) {
       if (!std::isfinite(matrix[i])) {
         return false;

@@ -99,6 +99,12 @@ struct Octave {
   id<MTLTexture> convWorkTexture = nil; // private storage 2DArray[1]
 };
 
+struct DetectedKeypoint {
+  Keypoint keypoint;
+  int scale = 0;
+  float sub_scale = 0.0f;
+};
+
 static bool OctaveResourcesReady(const Octave& oct) {
   if (!oct.gaussianTextures || !oct.differenceTextures ||
       !oct.gradientTextures || !oct.downscaleParamsBuffer ||
@@ -155,10 +161,10 @@ class SiftMetalExtractorImpl {
   int ReadExtremaCount(Octave& oct);
   bool InterpolateKeypoints(Octave& oct, int extrema_count);
   bool ComputeOrientations(Octave& oct,
-                           const std::vector<Keypoint>& keypoints,
+                           const std::vector<DetectedKeypoint>& keypoints,
                            std::vector<std::pair<int, float>>& oriented);
   bool ComputeDescriptors(Octave& oct,
-                          const std::vector<Keypoint>& keypoints,
+                          const std::vector<DetectedKeypoint>& keypoints,
                           const std::vector<std::pair<int, float>>& oriented,
                           ExtractResult* result);
 
@@ -1167,7 +1173,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
         oct.interpolateOutputBuffer.contents);
     float sigmaRatio = oct.sigmas[1] / oct.sigmas[0];
 
-    std::vector<Keypoint> octKeypoints;
+    std::vector<DetectedKeypoint> octKeypoints;
     for (int k = 0; k < extremaCount; ++k) {
       auto& p = interpOut[k];
       if (!p.converged) continue;
@@ -1177,15 +1183,19 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
         continue;
       }
 
-      Keypoint kp;
-      kp.x = p.absoluteX;
-      kp.y = p.absoluteY;
-      kp.sigma = oct.sigmas[p.scale] * std::pow(sigmaRatio, p.subScale);
-      if (!std::isfinite(kp.sigma) || kp.sigma <= 0.0f) {
+      DetectedKeypoint detected;
+      detected.keypoint.x = p.absoluteX;
+      detected.keypoint.y = p.absoluteY;
+      detected.keypoint.sigma =
+          oct.sigmas[p.scale] * std::pow(sigmaRatio, p.subScale);
+      if (!std::isfinite(detected.keypoint.sigma) ||
+          detected.keypoint.sigma <= 0.0f) {
         continue;
       }
-      kp.orientation = 0; // Will be set during orientation pass.
-      octKeypoints.push_back(kp);
+      detected.keypoint.orientation = 0; // Set during orientation pass.
+      detected.scale = p.scale;
+      detected.sub_scale = p.subScale;
+      octKeypoints.push_back(detected);
     }
 
     if (octKeypoints.empty()) continue;
@@ -1557,7 +1567,7 @@ bool SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
 // ComputeOrientations
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::ComputeOrientations(
-    Octave& oct, const std::vector<Keypoint>& keypoints,
+    Octave& oct, const std::vector<DetectedKeypoint>& keypoints,
     std::vector<std::pair<int, float>>& oriented) {
   oriented.clear();
 
@@ -1580,7 +1590,8 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
   int validCount = 0;
   const int num_keypoints = static_cast<int>(keypoints.size());
   for (int k = 0; k < num_keypoints && validCount < keypoint_capacity_; ++k) {
-    const auto& kp = keypoints[k];
+    const auto& detected = keypoints[k];
+    const auto& kp = detected.keypoint;
     float x = kp.x / delta;
     float y = kp.y / delta;
     float sigma = kp.sigma / delta;
@@ -1591,21 +1602,10 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
       continue;
     }
 
-    // Determine the scale index by finding the closest sigma.
-    int scaleIdx = 0;
-    float bestDiff = 1e30f;
-    for (int s = 0; s < (int)oct.sigmas.size(); ++s) {
-      float diff = std::abs(oct.sigmas[s] - kp.sigma);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        scaleIdx = s;
-      }
-    }
-
     orientIn[validCount].index = static_cast<int32_t>(k);
     orientIn[validCount].absoluteX = kp.x;
     orientIn[validCount].absoluteY = kp.y;
-    orientIn[validCount].scale = static_cast<int32_t>(scaleIdx);
+    orientIn[validCount].scale = static_cast<int32_t>(detected.scale);
     orientIn[validCount].sigma = kp.sigma;
     ++validCount;
   }
@@ -1667,7 +1667,7 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
 // ComputeDescriptors
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::ComputeDescriptors(
-    Octave& oct, const std::vector<Keypoint>& keypoints,
+    Octave& oct, const std::vector<DetectedKeypoint>& keypoints,
     const std::vector<std::pair<int, float>>& oriented,
     ExtractResult* result) {
   int count = std::min((int)oriented.size(), descriptor_capacity_);
@@ -1685,28 +1685,14 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
   for (int i = 0; i < count; ++i) {
     int kpIdx = oriented[i].first;
     float theta = oriented[i].second;
-    const auto& kp = keypoints[kpIdx];
-
-    // Determine scale index.
-    int scaleIdx = 0;
-    float bestDiff = 1e30f;
-    for (int s = 0; s < (int)oct.sigmas.size(); ++s) {
-      float diff = std::abs(oct.sigmas[s] - kp.sigma);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        scaleIdx = s;
-      }
-    }
-    // Compute subScale.
-    float sigmaRatio = oct.sigmas[1] / oct.sigmas[0];
-    float subScale = std::log(kp.sigma / oct.sigmas[scaleIdx]) /
-                     std::log(sigmaRatio);
+    const auto& detected = keypoints[kpIdx];
+    const auto& kp = detected.keypoint;
 
     descIn[i].keypoint = static_cast<int32_t>(kpIdx);
     descIn[i].absoluteX = kp.x;
     descIn[i].absoluteY = kp.y;
-    descIn[i].scale = static_cast<int32_t>(scaleIdx);
-    descIn[i].subScale = subScale;
+    descIn[i].scale = static_cast<int32_t>(detected.scale);
+    descIn[i].subScale = detected.sub_scale;
     descIn[i].theta = theta;
   }
 
@@ -1759,7 +1745,7 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
       continue;
     }
 
-    const auto& kp = keypoints[kpIdx];
+    const auto& kp = keypoints[kpIdx].keypoint;
 
     Keypoint finalKp;
     finalKp.x = kp.x;

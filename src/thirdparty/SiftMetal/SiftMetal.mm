@@ -1736,7 +1736,7 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
 
     bool valid_descriptor = true;
     for (int j = 0; j < 128; ++j) {
-      if (dr.features[j] < 0 || dr.features[j] > 255) {
+      if (!std::isfinite(dr.features[j]) || dr.features[j] < 0.0f) {
         valid_descriptor = false;
         break;
       }
@@ -1754,11 +1754,8 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
     finalKp.orientation = dr.theta;
     result->keypoints.push_back(finalKp);
 
-    // Convert int32 features (0-255) back to float for COLMAP's
-    // normalization pipeline.
     for (int j = 0; j < 128; ++j) {
-      result->descriptors.push_back(
-          static_cast<float>(dr.features[j]) / 512.0f);
+      result->descriptors.push_back(dr.features[j]);
     }
   }
   return true;

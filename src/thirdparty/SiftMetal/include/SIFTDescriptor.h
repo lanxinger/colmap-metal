@@ -38,7 +38,7 @@ struct SIFTDescriptorResult {
     int32_t valid;
     int32_t keypoint;
     float theta;
-    int32_t features[SIFT_DESCRIPTOR_FEATURE_COUNT];
+    float features[SIFT_DESCRIPTOR_FEATURE_COUNT];
 };
 
 

@@ -46,13 +46,13 @@ void thresholdFeatures(
 }
 
     
-void quantizeFeatures(
+void storeFeatures(
     int count,
     thread float * features,
-    thread int * output
+    thread float * output
 ) {
     for (int i = 0; i < count; i++) {
-        output[i] = min(255.0, features[i] * 512.0);
+        output[i] = features[i];
     }
 }
 
@@ -255,7 +255,7 @@ kernel void siftDescriptors(
         results[gid] = result;
         return;
     }
-    quantizeFeatures(featureCount, features, result.features);
+    storeFeatures(featureCount, features, result.features);
     
     result.valid = 1;
     result.keypoint = input.keypoint;

@@ -1016,6 +1016,7 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
                            options:MTLResourceStorageModeShared];
   SIFTExtremaParameters extrema_params = {};
   extrema_params.capacity = static_cast<uint32_t>(extrema_capacity_);
+  extrema_params.peakThreshold = options_.peak_threshold;
   oct.extremaParamsBuffer =
       [device_ newBufferWithBytes:&extrema_params
                            length:sizeof(SIFTExtremaParameters)
@@ -1473,10 +1474,14 @@ bool SiftMetalExtractorImpl::EncodeExtrema(id<MTLCommandBuffer> cb,
   [enc setBuffer:oct.extremaParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.differenceTextures atIndex:0];
 
-  NSUInteger maxThreads = std::min<NSUInteger>(
-      siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup, 1024);
-  NSUInteger dim = (NSUInteger)std::cbrt((double)maxThreads);
-  MTLSize tg = {dim, dim, dim};
+  // SIMD-width-aligned 2D threadgroups; the z extent is only a few scales.
+  const NSUInteger maxThreads =
+      siftExtremaListPipeline_.maxTotalThreadsPerThreadgroup;
+  const NSUInteger tgWidth = std::min<NSUInteger>(
+      siftExtremaListPipeline_.threadExecutionWidth, maxThreads);
+  const NSUInteger tgHeight =
+      std::max<NSUInteger>(std::min<NSUInteger>(8, maxThreads / tgWidth), 1);
+  MTLSize tg = {tgWidth, tgHeight, 1};
   MTLSize gridSize = {(NSUInteger)(w - 2),
                       (NSUInteger)(h - 2),
                       (NSUInteger)(numDiff - 2)};

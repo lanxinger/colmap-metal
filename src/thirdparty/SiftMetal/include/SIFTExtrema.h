@@ -19,6 +19,7 @@ struct SIFTExtremaResult {
 
 struct SIFTExtremaParameters {
     uint32_t capacity;
+    float peakThreshold;
 };
 
 #endif /* SIFTExtrema_h */

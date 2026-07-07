@@ -22,17 +22,17 @@ constant int3 neighborOffsets[] = {
     int3(-1, +1, -1),
     int3( 0, +1, -1),
     int3(+1, +1, -1),
-    
+
     int3(-1, -1,  0),
     int3( 0, -1,  0),
     int3(+1, -1,  0),
     int3(-1,  0,  0),
-    
+
     int3(+1,  0,  0),
     int3(-1, +1,  0),
     int3( 0, +1,  0),
     int3(+1, +1,  0),
-    
+
     int3(-1, -1, +1),
     int3( 0, -1, +1),
     int3(+1, -1, +1),
@@ -65,21 +65,20 @@ kernel void siftExtremaList(
     device atomic_uint * outputCount [[buffer(1)]],
     constant SIFTExtremaParameters & parameters [[buffer(2)]],
     texture2d_array<float, access::read> inputTexture [[texture(0)]],
-    uint3 gid [[thread_position_in_grid]],
-    uint3 lid [[thread_position_in_threadgroup]],
-    uint tid [[thread_index_in_threadgroup]]
+    uint3 gid [[thread_position_in_grid]]
 ) {
-    // Thread group runs [0...output.width - 2][0...output.height - 2]
-    const uint threadsInThreadgroup = 1024;
-    threadgroup SIFTExtremaResult localResults[threadsInThreadgroup];
-    threadgroup atomic_int localCount;
-    atomic_store_explicit(&localCount, 0, memory_order_relaxed);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
+    // Thread grid runs [0...width - 2][0...height - 2][0...scales - 2]
     const int2 g = (int2)gid.xy + 1;
     const int s = (int)gid.z + 1;
     const float value = inputTexture.read(uint2(g), uint(s)).r;
-    
+
+    // Discard low-contrast candidates before the neighbor scan. This matches
+    // SiftGPU's detection threshold (0.8 x DoG threshold); candidates below
+    // it would be rejected by the interpolation pass anyway.
+    if (abs(value) < 0.8f * parameters.peakThreshold) {
+        return;
+    }
+
     float minimum = +1000;
     float maximum = -1000;
 
@@ -90,62 +89,16 @@ kernel void siftExtremaList(
     }
 
     if ((value < minimum) || (value > maximum)) {
-        const int i = atomic_fetch_add_explicit(&localCount, 1, memory_order_relaxed);
-        SIFTExtremaResult result;
-        result.x = g.x;
-        result.y = g.y;
-        result.scale = s;
-        localResults[i] = result;
-    }
-    
-    // Copy local results to output
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        const int count = atomic_load_explicit(&localCount, memory_order_relaxed);
-        if (count > 0) {
-            const uint b = atomic_fetch_add_explicit(outputCount, uint(count), memory_order_relaxed);
-            if (b < parameters.capacity) {
-                const uint writable = min(uint(count), parameters.capacity - b);
-                for (uint i = 0; i < writable; i++) {
-                    output[b + i] = localResults[i];
-                }
-            }
+        // Extrema are rare, so contention on the global counter is
+        // negligible; this avoids staging results in threadgroup memory.
+        const uint i =
+            atomic_fetch_add_explicit(outputCount, 1u, memory_order_relaxed);
+        if (i < parameters.capacity) {
+            SIFTExtremaResult result;
+            result.x = g.x;
+            result.y = g.y;
+            result.scale = s;
+            output[i] = result;
         }
     }
-}
-
-
-kernel void siftExtrema(
-    texture2d_array<float, access::write> outputTexture [[texture(0)]],
-    texture2d_array<float, access::read> inputTexture [[texture(1)]],
-    uint3 gid [[thread_position_in_grid]],
-    uint3 threadPositionInThreadGroup [[thread_position_in_threadgroup]],
-    uint3 threadsPerThreadGroup [[threads_per_threadgroup]]
-) {
-    // Thread group runs [0...output.width - 2][0...output.height - 2]
-    
-    const float value = inputTexture.read(gid.xy + 1, gid.z + 1).r;
-    const int2 center = int2(gid.xy);
-    
-    float minValue = +1000;
-    float maxValue = -1000;
-
-    for (int i = 0; i < 26; i++) {
-        int3 neighborOffset = neighborOffsets[i];
-        uint textureIndex = uint(int(gid.z) + neighborOffset.x);
-        int2 neighborDelta = int2(neighborOffset.yz);
-        uint2 coordinate = uint2(center + neighborDelta);
-        float neighborValue = inputTexture.read(coordinate + 1, textureIndex).r;
-
-        minValue = min(minValue, neighborValue);
-        maxValue = max(maxValue, neighborValue);
-    }
-    
-    float result = 0;
-    
-    if ((value < minValue) || (value > maxValue)) {
-        result = 1;
-    }
-
-    outputTexture.write(float4(result, 0, 0, 1), gid.xy + 1, gid.z);
 }

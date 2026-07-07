@@ -14,6 +14,9 @@
 #define SIFT_DESCRIPTOR_HISTOGRAM_WIDTH 4
 #define SIFT_DESCRIPTOR_ORIENTATION_BINS 8
 #define SIFT_DESCRIPTOR_FEATURE_COUNT 128
+// Threads per descriptor threadgroup in the siftDescriptors kernel: one per
+// spatial histogram cell.
+#define SIFT_DESCRIPTOR_THREADS     (SIFT_DESCRIPTOR_HISTOGRAM_WIDTH * SIFT_DESCRIPTOR_HISTOGRAM_WIDTH)
 
 
 struct SIFTDescriptorParameters {

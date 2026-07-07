@@ -1681,11 +1681,10 @@ void SiftMetalExtractorImpl::EncodeDescriptors(
   [enc setBuffer:oct.descriptorParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.gaussianTextures atIndex:0];
 
-  NSUInteger maxThreads =
-      siftDescriptorsPipeline_.maxTotalThreadsPerThreadgroup;
-  MTLSize tg = {maxThreads, 1, 1};
-  MTLSize gridSize = {(NSUInteger)count, 1, 1};
-  [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
+  // One threadgroup per descriptor; one thread per spatial histogram cell.
+  MTLSize tg = {SIFT_DESCRIPTOR_THREADS, 1, 1};
+  MTLSize grid = {(NSUInteger)count, 1, 1};
+  [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
 }
 
 // ---------------------------------------------------------------------------

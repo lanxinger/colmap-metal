@@ -1598,11 +1598,10 @@ void SiftMetalExtractorImpl::EncodeOrientations(
   [enc setBuffer:oct.orientationParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.gaussianTextures atIndex:0];
 
-  NSUInteger maxThreads =
-      siftOrientationPipeline_.maxTotalThreadsPerThreadgroup;
-  MTLSize tg = {maxThreads, 1, 1};
-  MTLSize gridSize = {(NSUInteger)count, 1, 1};
-  [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
+  // One threadgroup per keypoint; threads split the sampling window.
+  MTLSize tg = {SIFT_ORIENTATION_THREADS, 1, 1};
+  MTLSize grid = {(NSUInteger)count, 1, 1};
+  [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
 }
 
 // ---------------------------------------------------------------------------

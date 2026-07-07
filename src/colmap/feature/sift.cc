@@ -1350,13 +1350,14 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
 };
 
 #if defined(COLMAP_METAL_ENABLED)
-std::vector<sift_metal::MatchKeypoint> ToMetalMatchKeypoints(
-    const FeatureKeypoints& keypoints) {
-  std::vector<sift_metal::MatchKeypoint> metal_keypoints(keypoints.size());
+void ToMetalMatchKeypoints(
+    const FeatureKeypoints& keypoints,
+    std::vector<sift_metal::MatchKeypoint>* metal_keypoints) {
+  THROW_CHECK_NOTNULL(metal_keypoints);
+  metal_keypoints->resize(keypoints.size());
   for (size_t i = 0; i < keypoints.size(); ++i) {
-    metal_keypoints[i] = {keypoints[i].x, keypoints[i].y};
+    (*metal_keypoints)[i] = {keypoints[i].x, keypoints[i].y};
   }
-  return metal_keypoints;
 }
 
 std::array<float, 9> ToRowMajorArray(const Eigen::Matrix3f& matrix) {
@@ -1414,17 +1415,16 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
         static_cast<float>(options_.sift->max_ratio),
         static_cast<float>(options_.sift->max_distance),
         options_.sift->cross_check};
-    std::vector<sift_metal::MatchResult> metal_matches;
     if (!matcher_.Match(image1.descriptors->data.data(),
                         image1.descriptors->data.rows(),
                         image2.descriptors->data.data(),
                         image2.descriptors->data.rows(),
                         match_options,
-                        &metal_matches)) {
+                        &metal_matches_)) {
       LOG(ERROR) << "Metal SIFT feature matching failed";
       return;
     }
-    ConvertMetalMatches(metal_matches, matches);
+    ConvertMetalMatches(metal_matches_, matches);
   }
 
   void MatchGuided(const double max_error,
@@ -1491,10 +1491,8 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
         use_essential_matrix ? normalized_keypoints1 : *image1.keypoints;
     const FeatureKeypoints& keypoints2 =
         use_essential_matrix ? normalized_keypoints2 : *image2.keypoints;
-    const std::vector<sift_metal::MatchKeypoint> metal_keypoints1 =
-        ToMetalMatchKeypoints(keypoints1);
-    const std::vector<sift_metal::MatchKeypoint> metal_keypoints2 =
-        ToMetalMatchKeypoints(keypoints2);
+    ToMetalMatchKeypoints(keypoints1, &metal_keypoints1_);
+    ToMetalMatchKeypoints(keypoints2, &metal_keypoints2_);
 
     const std::array<float, 9> matrix = ToRowMajorArray(guided_matrix);
 
@@ -1505,27 +1503,29 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     const sift_metal::MatchGuidedGeometry guided_geometry =
         use_homography ? sift_metal::MatchGuidedGeometry::HOMOGRAPHY
                        : sift_metal::MatchGuidedGeometry::EPIPOLAR;
-    std::vector<sift_metal::MatchResult> metal_matches;
     if (!matcher_.MatchGuided(image1.descriptors->data.data(),
                               image1.descriptors->data.rows(),
-                              metal_keypoints1.data(),
+                              metal_keypoints1_.data(),
                               image2.descriptors->data.data(),
                               image2.descriptors->data.rows(),
-                              metal_keypoints2.data(),
+                              metal_keypoints2_.data(),
                               match_options,
                               guided_geometry,
                               matrix.data(),
                               max_residual,
-                              &metal_matches)) {
+                              &metal_matches_)) {
       LOG(ERROR) << "Metal guided SIFT feature matching failed";
       return;
     }
-    ConvertMetalMatches(metal_matches, &two_view_geometry->inlier_matches);
+    ConvertMetalMatches(metal_matches_, &two_view_geometry->inlier_matches);
   }
 
  private:
   const FeatureMatchingOptions options_;
   sift_metal::SiftMetalMatcher matcher_;
+  std::vector<sift_metal::MatchResult> metal_matches_;
+  std::vector<sift_metal::MatchKeypoint> metal_keypoints1_;
+  std::vector<sift_metal::MatchKeypoint> metal_keypoints2_;
 };
 #endif  // COLMAP_METAL_ENABLED
 

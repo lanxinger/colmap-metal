@@ -247,6 +247,20 @@ TEST(ExtractSiftFeaturesMetal, RejectsUnsupportedFirstOctave) {
   EXPECT_FALSE(extractor.Init(options, 256, 256));
 }
 
+TEST(ExtractSiftFeaturesMetal, ClearsResultOnInvalidInput) {
+  sift_metal::Options options;
+  sift_metal::SiftMetalExtractor extractor;
+  ASSERT_TRUE(extractor.Init(options, 256, 256));
+
+  sift_metal::ExtractResult result;
+  result.keypoints.push_back({1.0f, 2.0f, 3.0f, 4.0f});
+  result.descriptors.resize(128, 1.0f);
+
+  EXPECT_FALSE(extractor.Extract(nullptr, 256, 256, &result));
+  EXPECT_TRUE(result.keypoints.empty());
+  EXPECT_TRUE(result.descriptors.empty());
+}
+
 TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
   sift_metal::SiftMetalMatcher matcher;
   ASSERT_TRUE(matcher.Init());

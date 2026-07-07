@@ -1049,12 +1049,16 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                                       ExtractResult* result) {
-  if (!data || !result || w <= 0 || h <= 0) {
+  if (!result) {
     return false;
   }
 
   result->keypoints.clear();
   result->descriptors.clear();
+
+  if (!data || w <= 0 || h <= 0) {
+    return false;
+  }
 
   // Recreate textures if image size changed.
   if (w != input_w_ || h != input_h_) {

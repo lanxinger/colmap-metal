@@ -89,8 +89,8 @@ void smoothHistogram(
 
 void getOrientationsHistogram(
     texture2d_array<float, access::read> g,
-    int absoluteX,
-    int absoluteY,
+    float absoluteX,
+    float absoluteY,
     int scale,
     float keypointSigma,
     float delta,
@@ -98,8 +98,8 @@ void getOrientationsHistogram(
     thread float * histogram
 ) {
     const int bins = SIFT_ORIENTATION_HISTOGRAM_BINS;
-    int x = round((float)absoluteX / delta);
-    int y = round((float)absoluteY / delta);
+    int x = round(absoluteX / delta);
+    int y = round(absoluteY / delta);
     float sigma = keypointSigma / delta;
 
     float exponentDenominator = 2.0 * lambda * lambda;

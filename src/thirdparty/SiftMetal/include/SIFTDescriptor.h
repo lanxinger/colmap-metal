@@ -26,8 +26,8 @@ struct SIFTDescriptorParameters {
 
 struct SIFTDescriptorInput {
     int32_t keypoint;
-    int32_t absoluteX;
-    int32_t absoluteY;
+    float absoluteX;
+    float absoluteY;
     int32_t scale;
     float subScale;
     float theta;

@@ -20,8 +20,8 @@ struct SIFTOrientationParameters {
 
 struct SIFTOrientationKeypoint {
     int32_t index;
-    int32_t absoluteX;
-    int32_t absoluteY;
+    float absoluteX;
+    float absoluteY;
     int32_t scale;
     float sigma;
 };

@@ -1603,8 +1603,8 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
     }
 
     orientIn[validCount].index = static_cast<int32_t>(k);
-    orientIn[validCount].absoluteX = static_cast<int32_t>(kp.x);
-    orientIn[validCount].absoluteY = static_cast<int32_t>(kp.y);
+    orientIn[validCount].absoluteX = kp.x;
+    orientIn[validCount].absoluteY = kp.y;
     orientIn[validCount].scale = static_cast<int32_t>(scaleIdx);
     orientIn[validCount].sigma = kp.sigma;
     ++validCount;
@@ -1703,8 +1703,8 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
                      std::log(sigmaRatio);
 
     descIn[i].keypoint = static_cast<int32_t>(kpIdx);
-    descIn[i].absoluteX = static_cast<int32_t>(kp.x);
-    descIn[i].absoluteY = static_cast<int32_t>(kp.y);
+    descIn[i].absoluteX = kp.x;
+    descIn[i].absoluteY = kp.y;
     descIn[i].scale = static_cast<int32_t>(scaleIdx);
     descIn[i].subScale = subScale;
     descIn[i].theta = theta;

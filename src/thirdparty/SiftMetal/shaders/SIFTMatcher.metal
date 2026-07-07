@@ -97,21 +97,27 @@ kernel void siftMatchBest(
   float bestScore = FLT_MAX;
   float secondBestScore = FLT_MAX;
 
-  const uint desc1Offset = gid * SIFT_MATCHER_DESCRIPTOR_DIM;
+  // Cache this thread's descriptor once, as 4-byte vectors.
+  const device uchar4* desc1 = (const device uchar4*)(
+      descriptors1 + gid * SIFT_MATCHER_DESCRIPTOR_DIM);
+  uchar4 d1[SIFT_MATCHER_DESCRIPTOR_DIM / 4];
+  for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM / 4; ++k) {
+    d1[k] = desc1[k];
+  }
 
   for (uint idx2 = 0; idx2 < params.numDescriptors2; ++idx2) {
     if (RejectByGuidedGeometry(params, keypoints1, keypoints2, gid, idx2)) {
       continue;
     }
 
-    int score = 0;
-    const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
-    for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
-      const int v1 = int(descriptors1[desc1Offset + k]);
-      const int v2 = int(descriptors2[desc2Offset + k]);
-      const int diff = v1 - v2;
-      score += diff * diff;
+    const device uchar4* desc2 = (const device uchar4*)(
+        descriptors2 + idx2 * SIFT_MATCHER_DESCRIPTOR_DIM);
+    int4 acc = int4(0);
+    for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM / 4; ++k) {
+      const int4 diff = int4(d1[k]) - int4(desc2[k]);
+      acc += diff * diff;
     }
+    const int score = acc.x + acc.y + acc.z + acc.w;
 
     const float scoref = float(score);
     if (scoref < bestScore) {
@@ -152,29 +158,31 @@ kernel void siftMatchBestDotParallel(
   threadgroup float secondBestScores[SIFT_MATCHER_DOT_THREADS];
   threadgroup int bestIndices[SIFT_MATCHER_DOT_THREADS];
   threadgroup int secondBestIndices[SIFT_MATCHER_DOT_THREADS];
-  threadgroup uchar descriptor1[SIFT_MATCHER_DESCRIPTOR_DIM];
+  threadgroup uchar4 descriptor1[SIFT_MATCHER_DESCRIPTOR_DIM / 4];
 
   float localBestScore = 0.0f;
   float localSecondBestScore = 0.0f;
   int localBestIdx = -1;
   int localSecondBestIdx = -1;
 
-  const uint desc1Offset = gid * SIFT_MATCHER_DESCRIPTOR_DIM;
-  for (uint k = tid; k < SIFT_MATCHER_DESCRIPTOR_DIM;
+  const device uchar4* desc1 = (const device uchar4*)(
+      descriptors1 + gid * SIFT_MATCHER_DESCRIPTOR_DIM);
+  for (uint k = tid; k < SIFT_MATCHER_DESCRIPTOR_DIM / 4;
        k += threadsPerThreadgroup) {
-    descriptor1[k] = descriptors1[desc1Offset + k];
+    descriptor1[k] = desc1[k];
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   for (uint idx2 = tid; idx2 < params.numDescriptors2;
        idx2 += threadsPerThreadgroup) {
-    const uint desc2Offset = idx2 * SIFT_MATCHER_DESCRIPTOR_DIM;
-    int score = 0;
-    for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM; ++k) {
-      score += int(descriptor1[k]) * int(descriptors2[desc2Offset + k]);
+    const device uchar4* desc2 = (const device uchar4*)(
+        descriptors2 + idx2 * SIFT_MATCHER_DESCRIPTOR_DIM);
+    int4 acc = int4(0);
+    for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM / 4; ++k) {
+      acc += int4(descriptor1[k]) * int4(desc2[k]);
     }
 
-    const float scoref = float(score);
+    const float scoref = float(acc.x + acc.y + acc.z + acc.w);
     if (scoref > localBestScore) {
       localSecondBestIdx = localBestIdx;
       localSecondBestScore = localBestScore;

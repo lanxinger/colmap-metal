@@ -1748,8 +1748,8 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
     const auto& kp = keypoints[kpIdx].keypoint;
 
     Keypoint finalKp;
-    finalKp.x = kp.x;
-    finalKp.y = kp.y;
+    finalKp.x = kp.x + 0.5f;
+    finalKp.y = kp.y + 0.5f;
     finalKp.sigma = kp.sigma;
     finalKp.orientation = dr.theta;
     result->keypoints.push_back(finalKp);

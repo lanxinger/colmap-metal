@@ -1087,6 +1087,12 @@ TEST(MatchGuidedSiftFeaturesGPU, Nominal) {
             std::vector<FeatureKeypoint>{{100, 0}, {1, 0}}),
         std::make_shared<FeatureDescriptors>(
             CreateRandomFeatureDescriptors(2))};
+    const FeatureMatcher::Image image1_updated_keypoints = {
+        /*image_id=*/1,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{100, 0}, {1, 0}}),
+        image1.descriptors};
 
     FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
     options.use_gpu = true;
@@ -1102,6 +1108,12 @@ TEST(MatchGuidedSiftFeaturesGPU, Nominal) {
 
     matcher->MatchGuided(kMaxError, image1, image2, &two_view_geometry);
     ExpectReversedInlierMatches(two_view_geometry);
+
+    matcher->MatchGuided(
+        kMaxError, image1_updated_keypoints, image2, &two_view_geometry);
+    EXPECT_EQ(two_view_geometry.inlier_matches.size(), 1);
+    EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+    EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
 
     matcher->MatchGuided(kMaxError, image3, image2, &two_view_geometry);
     EXPECT_EQ(two_view_geometry.inlier_matches.size(), 1);

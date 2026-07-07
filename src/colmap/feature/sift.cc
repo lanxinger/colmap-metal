@@ -1478,21 +1478,14 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
       return;
     }
 
-    const FeatureKeypoints normalized_keypoints1 =
+    const auto& metal_keypoints1 =
         use_essential_matrix
-            ? NormalizeFeatureKeypoints(*image1.camera, *image1.keypoints)
-            : FeatureKeypoints();
-    const FeatureKeypoints normalized_keypoints2 =
+            ? GetNormalizedMetalKeypoints(image1, &metal_keypoints1_)
+            : GetRawMetalKeypoints(image1, &metal_keypoints1_);
+    const auto& metal_keypoints2 =
         use_essential_matrix
-            ? NormalizeFeatureKeypoints(*image2.camera, *image2.keypoints)
-            : FeatureKeypoints();
-
-    const FeatureKeypoints& keypoints1 =
-        use_essential_matrix ? normalized_keypoints1 : *image1.keypoints;
-    const FeatureKeypoints& keypoints2 =
-        use_essential_matrix ? normalized_keypoints2 : *image2.keypoints;
-    ToMetalMatchKeypoints(keypoints1, &metal_keypoints1_);
-    ToMetalMatchKeypoints(keypoints2, &metal_keypoints2_);
+            ? GetNormalizedMetalKeypoints(image2, &metal_keypoints2_)
+            : GetRawMetalKeypoints(image2, &metal_keypoints2_);
 
     const std::array<float, 9> matrix = ToRowMajorArray(guided_matrix);
 
@@ -1505,10 +1498,10 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
                        : sift_metal::MatchGuidedGeometry::EPIPOLAR;
     if (!matcher_.MatchGuided(image1.descriptors->data.data(),
                               image1.descriptors->data.rows(),
-                              metal_keypoints1_.data(),
+                              metal_keypoints1.data(),
                               image2.descriptors->data.data(),
                               image2.descriptors->data.rows(),
-                              metal_keypoints2_.data(),
+                              metal_keypoints2.data(),
                               match_options,
                               guided_geometry,
                               matrix.data(),
@@ -1521,11 +1514,65 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
   }
 
  private:
+  struct MetalKeypointCacheEntry {
+    const FeatureKeypoints* source_keypoints = nullptr;
+    const Camera* camera = nullptr;
+    size_t num_keypoints = 0;
+    std::vector<sift_metal::MatchKeypoint> keypoints;
+  };
+
+  const std::vector<sift_metal::MatchKeypoint>& GetRawMetalKeypoints(
+      const Image& image,
+      std::vector<sift_metal::MatchKeypoint>* scratch) {
+    if (image.image_id == kInvalidImageId) {
+      ToMetalMatchKeypoints(*image.keypoints, scratch);
+      return *scratch;
+    }
+
+    MetalKeypointCacheEntry& entry = raw_metal_keypoint_cache_[image.image_id];
+    const FeatureKeypoints* keypoints = image.keypoints.get();
+    if (entry.source_keypoints != keypoints ||
+        entry.num_keypoints != keypoints->size()) {
+      ToMetalMatchKeypoints(*keypoints, &entry.keypoints);
+      entry.source_keypoints = keypoints;
+      entry.camera = nullptr;
+      entry.num_keypoints = keypoints->size();
+    }
+    return entry.keypoints;
+  }
+
+  const std::vector<sift_metal::MatchKeypoint>& GetNormalizedMetalKeypoints(
+      const Image& image,
+      std::vector<sift_metal::MatchKeypoint>* scratch) {
+    if (image.image_id == kInvalidImageId) {
+      const FeatureKeypoints normalized_keypoints =
+          NormalizeFeatureKeypoints(*image.camera, *image.keypoints);
+      ToMetalMatchKeypoints(normalized_keypoints, scratch);
+      return *scratch;
+    }
+
+    MetalKeypointCacheEntry& entry =
+        normalized_metal_keypoint_cache_[image.image_id];
+    const FeatureKeypoints* keypoints = image.keypoints.get();
+    if (entry.source_keypoints != keypoints || entry.camera != image.camera ||
+        entry.num_keypoints != keypoints->size()) {
+      const FeatureKeypoints normalized_keypoints =
+          NormalizeFeatureKeypoints(*image.camera, *image.keypoints);
+      ToMetalMatchKeypoints(normalized_keypoints, &entry.keypoints);
+      entry.source_keypoints = keypoints;
+      entry.camera = image.camera;
+      entry.num_keypoints = keypoints->size();
+    }
+    return entry.keypoints;
+  }
+
   const FeatureMatchingOptions options_;
   sift_metal::SiftMetalMatcher matcher_;
   std::vector<sift_metal::MatchResult> metal_matches_;
   std::vector<sift_metal::MatchKeypoint> metal_keypoints1_;
   std::vector<sift_metal::MatchKeypoint> metal_keypoints2_;
+  std::map<image_t, MetalKeypointCacheEntry> raw_metal_keypoint_cache_;
+  std::map<image_t, MetalKeypointCacheEntry> normalized_metal_keypoint_cache_;
 };
 #endif  // COLMAP_METAL_ENABLED
 

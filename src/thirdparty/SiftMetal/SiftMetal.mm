@@ -75,7 +75,6 @@ struct Octave {
   id<MTLBuffer> extremaParamsBuffer = nil;
 
   // Buffers for interpolation
-  id<MTLBuffer> interpolateInputBuffer = nil;
   id<MTLBuffer> interpolateOutputBuffer = nil;
   id<MTLBuffer> interpolateParamsBuffer = nil;
 
@@ -108,7 +107,7 @@ static bool OctaveResourcesReady(const Octave& oct) {
   if (!oct.gaussianTextures || !oct.differenceTextures ||
       !oct.downscaleParamsBuffer || !oct.convWorkTexture ||
       !oct.extremaOutputBuffer || !oct.extremaIndexBuffer ||
-      !oct.extremaParamsBuffer || !oct.interpolateInputBuffer ||
+      !oct.extremaParamsBuffer ||
       !oct.interpolateOutputBuffer || !oct.interpolateParamsBuffer ||
       !oct.orientationInputBuffer || !oct.orientationOutputBuffer ||
       !oct.orientationParamsBuffer || !oct.descriptorInputBuffer ||
@@ -154,16 +153,28 @@ class SiftMetalExtractorImpl {
   bool EncodeDifferences(id<MTLCommandBuffer> cb, Octave& oct);
   bool EncodeExtrema(id<MTLCommandBuffer> cb, Octave& oct);
 
-  // Per-octave extraction
+  // Per-octave extraction. Each stage encodes its GPU work for all octaves
+  // into one shared command buffer, so Extract synchronizes with the GPU
+  // once per stage instead of once per octave and stage.
   int ReadExtremaCount(Octave& oct);
-  bool InterpolateKeypoints(Octave& oct, int extrema_count);
-  bool ComputeOrientations(Octave& oct,
-                           const std::vector<DetectedKeypoint>& keypoints,
-                           std::vector<std::pair<int, float>>& oriented);
-  bool ComputeDescriptors(Octave& oct,
-                          const std::vector<DetectedKeypoint>& keypoints,
-                          const std::vector<std::pair<int, float>>& oriented,
-                          ExtractResult* result);
+  bool EncodeInterpolateKeypoints(id<MTLCommandBuffer> cb, Octave& oct,
+                                  int extrema_count);
+  void ReadInterpolatedKeypoints(Octave& oct, int extrema_count,
+                                 std::vector<DetectedKeypoint>* keypoints);
+  int PrepareOrientationInputs(Octave& oct,
+                               const std::vector<DetectedKeypoint>& keypoints);
+  bool EncodeOrientations(id<MTLCommandBuffer> cb, Octave& oct, int count);
+  void ReadOrientations(Octave& oct, int count,
+                        const std::vector<DetectedKeypoint>& keypoints,
+                        std::vector<std::pair<int, float>>* oriented);
+  int PrepareDescriptorInputs(
+      Octave& oct, const std::vector<DetectedKeypoint>& keypoints,
+      const std::vector<std::pair<int, float>>& oriented);
+  bool EncodeDescriptors(id<MTLCommandBuffer> cb, Octave& oct, int count);
+  void ReadDescriptors(Octave& oct, int count,
+                       const std::vector<DetectedKeypoint>& keypoints,
+                       const std::vector<std::pair<int, float>>& oriented,
+                       ExtractResult* result);
 
   // Metal objects
   id<MTLDevice> device_;
@@ -1007,10 +1018,6 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
                           options:MTLResourceStorageModeShared];
 
   // Interpolation buffers
-  oct.interpolateInputBuffer =
-      [device_ newBufferWithLength:keypoint_capacity_ *
-                                       sizeof(SIFTInterpolateInputKeypoint)
-                           options:MTLResourceStorageModeShared];
   oct.interpolateOutputBuffer =
       [device_ newBufferWithLength:keypoint_capacity_ *
                                        sizeof(SIFTInterpolateOutputKeypoint)
@@ -1131,60 +1138,95 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     }
   }
 
-  // Phase 2: For each octave, read extrema, interpolate, orientate, describe.
-  for (auto& oct : octaves_) {
-    int extremaCount = ReadExtremaCount(oct);
-    if (extremaCount <= 0) continue;
-    extremaCount = std::min(extremaCount, extrema_capacity_);
+  // Phase 2: interpolate, orientate, and describe keypoints. Every stage
+  // encodes the dispatches for all octaves into one command buffer and waits
+  // once, instead of synchronizing per octave and stage.
+  const size_t num_octaves = octaves_.size();
+  std::vector<int> extrema_counts(num_octaves, 0);
+  std::vector<int> orientation_counts(num_octaves, 0);
+  std::vector<int> descriptor_counts(num_octaves, 0);
+  std::vector<std::vector<DetectedKeypoint>> oct_keypoints(num_octaves);
+  // Per octave: (keypoint_index, theta) pairs.
+  std::vector<std::vector<std::pair<int, float>>> oct_oriented(num_octaves);
 
-    if (!InterpolateKeypoints(oct, extremaCount)) {
+  // Stage 1: interpolate extrema.
+  {
+    id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+    if (!cb) {
       return false;
     }
-
-    // Read interpolated keypoints.
-    auto* interpOut = static_cast<SIFTInterpolateOutputKeypoint*>(
-        oct.interpolateOutputBuffer.contents);
-    float sigmaRatio = oct.sigmas[1] / oct.sigmas[0];
-
-    std::vector<DetectedKeypoint> octKeypoints;
-    for (int k = 0; k < extremaCount; ++k) {
-      auto& p = interpOut[k];
-      if (!p.converged) continue;
-      if (p.scale < 0 || p.scale >= static_cast<int32_t>(oct.sigmas.size()) ||
-          !std::isfinite(p.absoluteX) || !std::isfinite(p.absoluteY) ||
-          !std::isfinite(p.subScale)) {
-        continue;
+    bool encoded = false;
+    for (size_t i = 0; i < num_octaves; ++i) {
+      const int extremaCount =
+          std::min(ReadExtremaCount(octaves_[i]), keypoint_capacity_);
+      extrema_counts[i] = extremaCount;
+      if (extremaCount <= 0) continue;
+      if (!EncodeInterpolateKeypoints(cb, octaves_[i], extremaCount)) {
+        return false;
       }
+      encoded = true;
+    }
+    if (encoded && !CommitAndWait(cb, @"keypoint interpolation")) {
+      return false;
+    }
+  }
 
-      DetectedKeypoint detected;
-      detected.keypoint.x = p.absoluteX;
-      detected.keypoint.y = p.absoluteY;
-      detected.keypoint.sigma =
-          oct.sigmas[p.scale] * std::pow(sigmaRatio, p.subScale);
-      if (!std::isfinite(detected.keypoint.sigma) ||
-          detected.keypoint.sigma <= 0.0f) {
-        continue;
+  // Stage 2: filter interpolated keypoints and compute orientations.
+  {
+    id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+    if (!cb) {
+      return false;
+    }
+    bool encoded = false;
+    for (size_t i = 0; i < num_octaves; ++i) {
+      if (extrema_counts[i] <= 0) continue;
+      ReadInterpolatedKeypoints(octaves_[i], extrema_counts[i],
+                                &oct_keypoints[i]);
+      if (oct_keypoints[i].empty()) continue;
+      const int count = PrepareOrientationInputs(octaves_[i], oct_keypoints[i]);
+      orientation_counts[i] = count;
+      if (count <= 0) continue;
+      if (!EncodeOrientations(cb, octaves_[i], count)) {
+        return false;
       }
-      detected.keypoint.orientation = 0; // Set during orientation pass.
-      detected.scale = p.scale;
-      detected.sub_scale = p.subScale;
-      octKeypoints.push_back(detected);
+      encoded = true;
     }
-
-    if (octKeypoints.empty()) continue;
-
-    // Compute orientations.
-    std::vector<std::pair<int, float>> oriented; // (keypoint_index, theta)
-    if (!ComputeOrientations(oct, octKeypoints, oriented)) {
+    if (encoded && !CommitAndWait(cb, @"orientation")) {
       return false;
     }
+  }
 
-    if (oriented.empty()) continue;
-
-    // Compute descriptors.
-    if (!ComputeDescriptors(oct, octKeypoints, oriented, result)) {
+  // Stage 3: expand orientations and compute descriptors.
+  {
+    id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
+    if (!cb) {
       return false;
     }
+    bool encoded = false;
+    for (size_t i = 0; i < num_octaves; ++i) {
+      if (orientation_counts[i] <= 0) continue;
+      ReadOrientations(octaves_[i], orientation_counts[i], oct_keypoints[i],
+                       &oct_oriented[i]);
+      if (oct_oriented[i].empty()) continue;
+      const int count = PrepareDescriptorInputs(octaves_[i], oct_keypoints[i],
+                                                oct_oriented[i]);
+      descriptor_counts[i] = count;
+      if (count <= 0) continue;
+      if (!EncodeDescriptors(cb, octaves_[i], count)) {
+        return false;
+      }
+      encoded = true;
+    }
+    if (encoded && !CommitAndWait(cb, @"descriptor")) {
+      return false;
+    }
+  }
+
+  // Stage 4: read back descriptors.
+  for (size_t i = 0; i < num_octaves; ++i) {
+    if (descriptor_counts[i] <= 0) continue;
+    ReadDescriptors(octaves_[i], descriptor_counts[i], oct_keypoints[i],
+                    oct_oriented[i], result);
   }
 
   const int max_num_orientations =
@@ -1451,22 +1493,21 @@ int SiftMetalExtractorImpl::ReadExtremaCount(Octave& oct) {
 }
 
 // ---------------------------------------------------------------------------
-// InterpolateKeypoints
+// EncodeInterpolateKeypoints
 // ---------------------------------------------------------------------------
-bool SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
-                                                    int extremaCount) {
-  int count = std::min(extremaCount, keypoint_capacity_);
-
-  // Copy extrema to interpolation input buffer.
-  auto* extrema =
-      static_cast<SIFTExtremaResult*>(oct.extremaOutputBuffer.contents);
-  auto* interpIn = static_cast<SIFTInterpolateInputKeypoint*>(
-      oct.interpolateInputBuffer.contents);
-  for (int i = 0; i < count; ++i) {
-    interpIn[i].x = extrema[i].x;
-    interpIn[i].y = extrema[i].y;
-    interpIn[i].scale = extrema[i].scale;
-  }
+bool SiftMetalExtractorImpl::EncodeInterpolateKeypoints(
+    id<MTLCommandBuffer> cb, Octave& oct, int extremaCount) {
+  // The extrema output buffer doubles as the interpolation input buffer.
+  static_assert(sizeof(SIFTExtremaResult) ==
+                    sizeof(SIFTInterpolateInputKeypoint),
+                "Extrema/interpolate keypoint ABI mismatch");
+  static_assert(offsetof(SIFTExtremaResult, x) ==
+                        offsetof(SIFTInterpolateInputKeypoint, x) &&
+                    offsetof(SIFTExtremaResult, y) ==
+                        offsetof(SIFTInterpolateInputKeypoint, y) &&
+                    offsetof(SIFTExtremaResult, scale) ==
+                        offsetof(SIFTInterpolateInputKeypoint, scale),
+                "Extrema/interpolate keypoint field offset mismatch");
 
   // Set interpolation parameters.
   auto* params = static_cast<SIFTInterpolateParameters*>(
@@ -1480,38 +1521,65 @@ bool SiftMetalExtractorImpl::InterpolateKeypoints(Octave& oct,
   params->edgeThreshold = options_.edge_threshold;
   params->numberOfScales = static_cast<int32_t>(oct.num_scales);
 
-  id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
-  if (!cb) {
-    return false;
-  }
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (!enc) {
     return false;
   }
   [enc setComputePipelineState:siftInterpolatePipeline_];
   [enc setBuffer:oct.interpolateOutputBuffer offset:0 atIndex:0];
-  [enc setBuffer:oct.interpolateInputBuffer offset:0 atIndex:1];
+  [enc setBuffer:oct.extremaOutputBuffer offset:0 atIndex:1];
   [enc setBuffer:oct.interpolateParamsBuffer offset:0 atIndex:2];
   [enc setTexture:oct.differenceTextures atIndex:0];
 
   NSUInteger maxThreads =
       siftInterpolatePipeline_.maxTotalThreadsPerThreadgroup;
   MTLSize tg = {maxThreads, 1, 1};
-  MTLSize gridSize = {(NSUInteger)count, 1, 1};
+  MTLSize gridSize = {(NSUInteger)extremaCount, 1, 1};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
-
-  return CommitAndWait(cb, @"keypoint interpolation");
+  return true;
 }
 
 // ---------------------------------------------------------------------------
-// ComputeOrientations
+// ReadInterpolatedKeypoints
 // ---------------------------------------------------------------------------
-bool SiftMetalExtractorImpl::ComputeOrientations(
-    Octave& oct, const std::vector<DetectedKeypoint>& keypoints,
-    std::vector<std::pair<int, float>>& oriented) {
-  oriented.clear();
+void SiftMetalExtractorImpl::ReadInterpolatedKeypoints(
+    Octave& oct, int extremaCount, std::vector<DetectedKeypoint>* keypoints) {
+  keypoints->clear();
+  auto* interpOut = static_cast<SIFTInterpolateOutputKeypoint*>(
+      oct.interpolateOutputBuffer.contents);
+  const float sigmaRatio = oct.sigmas[1] / oct.sigmas[0];
 
+  for (int k = 0; k < extremaCount; ++k) {
+    auto& p = interpOut[k];
+    if (!p.converged) continue;
+    if (p.scale < 0 || p.scale >= static_cast<int32_t>(oct.sigmas.size()) ||
+        !std::isfinite(p.absoluteX) || !std::isfinite(p.absoluteY) ||
+        !std::isfinite(p.subScale)) {
+      continue;
+    }
+
+    DetectedKeypoint detected;
+    detected.keypoint.x = p.absoluteX;
+    detected.keypoint.y = p.absoluteY;
+    detected.keypoint.sigma =
+        oct.sigmas[p.scale] * std::pow(sigmaRatio, p.subScale);
+    if (!std::isfinite(detected.keypoint.sigma) ||
+        detected.keypoint.sigma <= 0.0f) {
+      continue;
+    }
+    detected.keypoint.orientation = 0; // Set during orientation pass.
+    detected.scale = p.scale;
+    detected.sub_scale = p.subScale;
+    keypoints->push_back(detected);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PrepareOrientationInputs
+// ---------------------------------------------------------------------------
+int SiftMetalExtractorImpl::PrepareOrientationInputs(
+    Octave& oct, const std::vector<DetectedKeypoint>& keypoints) {
   float delta = oct.delta;
   float lambda = 1.5f;
   float orientThreshold = 0.8f;
@@ -1550,13 +1618,14 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
     orientIn[validCount].sigma = kp.sigma;
     ++validCount;
   }
+  return validCount;
+}
 
-  if (validCount == 0) return true;
-
-  id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
-  if (!cb) {
-    return false;
-  }
+// ---------------------------------------------------------------------------
+// EncodeOrientations
+// ---------------------------------------------------------------------------
+bool SiftMetalExtractorImpl::EncodeOrientations(id<MTLCommandBuffer> cb,
+                                                Octave& oct, int count) {
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (!enc) {
     return false;
@@ -1570,15 +1639,20 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
   NSUInteger maxThreads =
       siftOrientationPipeline_.maxTotalThreadsPerThreadgroup;
   MTLSize tg = {maxThreads, 1, 1};
-  MTLSize gridSize = {(NSUInteger)validCount, 1, 1};
+  MTLSize gridSize = {(NSUInteger)count, 1, 1};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
+  return true;
+}
 
-  if (!CommitAndWait(cb, @"orientation")) {
-    return false;
-  }
-
-  // Read orientation results.
+// ---------------------------------------------------------------------------
+// ReadOrientations
+// ---------------------------------------------------------------------------
+void SiftMetalExtractorImpl::ReadOrientations(
+    Octave& oct, int validCount,
+    const std::vector<DetectedKeypoint>& keypoints,
+    std::vector<std::pair<int, float>>* oriented) {
+  oriented->clear();
   auto* orientOut = static_cast<SIFTOrientationResult*>(
       oct.orientationOutputBuffer.contents);
   for (int k = 0; k < validCount; ++k) {
@@ -1598,21 +1672,19 @@ bool SiftMetalExtractorImpl::ComputeOrientations(
       if (!std::isfinite(theta)) {
         continue;
       }
-      oriented.emplace_back(kpIdx, theta);
+      oriented->emplace_back(kpIdx, theta);
     }
   }
-  return true;
 }
 
 // ---------------------------------------------------------------------------
-// ComputeDescriptors
+// PrepareDescriptorInputs
 // ---------------------------------------------------------------------------
-bool SiftMetalExtractorImpl::ComputeDescriptors(
+int SiftMetalExtractorImpl::PrepareDescriptorInputs(
     Octave& oct, const std::vector<DetectedKeypoint>& keypoints,
-    const std::vector<std::pair<int, float>>& oriented,
-    ExtractResult* result) {
-  int count = std::min((int)oriented.size(), descriptor_capacity_);
-  if (count == 0) return true;
+    const std::vector<std::pair<int, float>>& oriented) {
+  const int count = std::min((int)oriented.size(), descriptor_capacity_);
+  if (count == 0) return 0;
 
   auto* params =
       static_cast<SIFTDescriptorParameters*>(oct.descriptorParamsBuffer.contents);
@@ -1636,11 +1708,14 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
     descIn[i].subScale = detected.sub_scale;
     descIn[i].theta = theta;
   }
+  return count;
+}
 
-  id<MTLCommandBuffer> cb = [commandQueue_ commandBuffer];
-  if (!cb) {
-    return false;
-  }
+// ---------------------------------------------------------------------------
+// EncodeDescriptors
+// ---------------------------------------------------------------------------
+bool SiftMetalExtractorImpl::EncodeDescriptors(id<MTLCommandBuffer> cb,
+                                               Octave& oct, int count) {
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   if (!enc) {
     return false;
@@ -1657,12 +1732,16 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
   MTLSize gridSize = {(NSUInteger)count, 1, 1};
   [enc dispatchThreads:gridSize threadsPerThreadgroup:tg];
   [enc endEncoding];
+  return true;
+}
 
-  if (!CommitAndWait(cb, @"descriptor")) {
-    return false;
-  }
-
-  // Read descriptors.
+// ---------------------------------------------------------------------------
+// ReadDescriptors
+// ---------------------------------------------------------------------------
+void SiftMetalExtractorImpl::ReadDescriptors(
+    Octave& oct, int count, const std::vector<DetectedKeypoint>& keypoints,
+    const std::vector<std::pair<int, float>>& oriented,
+    ExtractResult* result) {
   auto* descOut = static_cast<SIFTDescriptorResult*>(
       oct.descriptorOutputBuffer.contents);
   for (int i = 0; i < count; ++i) {
@@ -1699,7 +1778,6 @@ bool SiftMetalExtractorImpl::ComputeDescriptors(
       result->descriptors.push_back(dr.features[j]);
     }
   }
-  return true;
 }
 
 // ===========================================================================

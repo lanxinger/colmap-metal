@@ -196,9 +196,9 @@ class SiftMetalExtractorImpl {
 
   // Seed textures
   id<MTLTexture> luminosityTexture_;  // R8Unorm, input size
-  id<MTLTexture> scaledTexture_;      // R32Float, seed size (2x)
-  id<MTLTexture> seedTexture_;        // R32Float, seed size (2x)
-  id<MTLTexture> seedConvWorkTexture_; // R32Float, seed size, private
+  id<MTLTexture> scaledTexture_;      // R16Float, seed size (2x)
+  id<MTLTexture> seedTexture_;        // R16Float, seed size (2x)
+  id<MTLTexture> seedConvWorkTexture_; // R16Float, seed size, private
 
   // Seed Gaussian blur convolution buffers
   id<MTLBuffer> seedConvWeightsBuffer_;
@@ -854,13 +854,13 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
                                       MTLPixelFormatR8Unorm,
                                       MTLStorageModeShared);
   scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                  MTLPixelFormatR32Float,
+                                  MTLPixelFormatR16Float,
                                   MTLStorageModePrivate);
   seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                MTLPixelFormatR32Float,
+                                MTLPixelFormatR16Float,
                                 MTLStorageModePrivate);
   seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                        MTLPixelFormatR32Float,
+                                        MTLPixelFormatR16Float,
                                         MTLStorageModePrivate);
 
   // Compute seed Gaussian blur kernel.
@@ -951,8 +951,12 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
   int numGaussians = num_scales + 3;
   int numDifferences = num_scales + 2;
 
+  // Gaussian images are normalized [0, 1] values; half precision halves
+  // bandwidth and memory on the most heavily trafficked textures. The DoG
+  // textures stay fp32: extrema detection and keypoint interpolation consume
+  // small differences and second derivatives of these values.
   oct.gaussianTextures = MakeTexture2DArray(
-      device_, w, h, numGaussians, MTLPixelFormatR32Float,
+      device_, w, h, numGaussians, MTLPixelFormatR16Float,
       MTLStorageModePrivate);
   oct.differenceTextures = MakeTexture2DArray(
       device_, w, h, numDifferences, MTLPixelFormatR32Float,
@@ -967,7 +971,7 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   // Convolution work texture (single-slice private).
   oct.convWorkTexture = MakeTexture2DArray(
-      device_, w, h, 1, MTLPixelFormatR32Float, MTLStorageModePrivate);
+      device_, w, h, 1, MTLPixelFormatR16Float, MTLStorageModePrivate);
 
   // Build convolution parameter buffers for Gaussian series.
   oct.convPairs.resize(numGaussians - 1);
@@ -1080,13 +1084,13 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                                         MTLPixelFormatR8Unorm,
                                         MTLStorageModeShared);
     scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                    MTLPixelFormatR32Float,
+                                    MTLPixelFormatR16Float,
                                     MTLStorageModePrivate);
     seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                  MTLPixelFormatR32Float,
+                                  MTLPixelFormatR16Float,
                                   MTLStorageModePrivate);
     seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                          MTLPixelFormatR32Float,
+                                          MTLPixelFormatR16Float,
                                           MTLStorageModePrivate);
     if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
         !seedConvWorkTexture_) {
@@ -1270,7 +1274,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
 // EncodeSeedTexture: upscale grayscale input + Gaussian blur.
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
-  // Bilinear upscale luminosity → scaled. Also converts R8Unorm → R32Float;
+  // Bilinear upscale luminosity → scaled. Also converts R8Unorm → R16Float;
   // at equal sizes the kernel samples exact texel centers, i.e. a plain copy.
   {
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];

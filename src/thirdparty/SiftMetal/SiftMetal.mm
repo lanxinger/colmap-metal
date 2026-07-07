@@ -311,15 +311,18 @@ class SiftMetalMatcherImpl {
              std::vector<MatchResult>* matches);
 
  private:
-  bool RunOneWay(const uint8_t* descriptors1, int num_descriptors1,
-                 const MatchKeypoint* keypoints1,
-                 const uint8_t* descriptors2, int num_descriptors2,
-                 const MatchKeypoint* keypoints2,
-                 const MatchOptions& options,
-                 MatchGuidedGeometry guided_geometry,
-                 const float matrix[9], float max_residual,
-                 bool reverse_guided,
-                 std::vector<SIFTMatcherResult>* results);
+  // Encodes one matching direction into the shared command buffer, using
+  // per-direction params/results buffers so forward and cross-check reverse
+  // passes can run in a single commit.
+  bool EncodeOneWay(id<MTLCommandBuffer> commandBuffer,
+                    id<MTLBuffer> descriptors1Buffer, int num_descriptors1,
+                    id<MTLBuffer> keypoints1Buffer,
+                    id<MTLBuffer> descriptors2Buffer, int num_descriptors2,
+                    id<MTLBuffer> keypoints2Buffer,
+                    const MatchOptions& options,
+                    MatchGuidedGeometry guided_geometry,
+                    const float matrix[9], float max_residual,
+                    bool reverse_guided, int direction);
 
   id<MTLBuffer> GetDescriptorBuffer(const uint8_t* descriptors,
                                     int num_descriptors);
@@ -343,9 +346,12 @@ class SiftMetalMatcherImpl {
   id<MTLComputePipelineState> siftMatchBestPipeline_;
   id<MTLComputePipelineState> siftMatchBestDotParallelPipeline_;
   id<MTLBuffer> dummyKeypointBuffer_;
-  id<MTLBuffer> paramsBuffer_;
-  id<MTLBuffer> resultsBuffer_;
-  size_t resultsBufferCapacity_ = 0;
+  struct DirectionResources {
+    id<MTLBuffer> paramsBuffer = nil;
+    id<MTLBuffer> resultsBuffer = nil;
+    size_t resultsCapacity = 0;
+  };
+  DirectionResources directions_[2];
   id<MTLBuffer> keypoints1Buffer_;
   id<MTLBuffer> keypoints2Buffer_;
   size_t keypoints1BufferCapacity_ = 0;
@@ -515,13 +521,15 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetKeypointBuffer(
   return buffer;
 }
 
-bool SiftMetalMatcherImpl::RunOneWay(
-    const uint8_t* descriptors1, int num_descriptors1,
-    const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
-    int num_descriptors2, const MatchKeypoint* keypoints2,
+bool SiftMetalMatcherImpl::EncodeOneWay(
+    id<MTLCommandBuffer> commandBuffer,
+    id<MTLBuffer> descriptors1Buffer, int num_descriptors1,
+    id<MTLBuffer> keypoints1Buffer,
+    id<MTLBuffer> descriptors2Buffer, int num_descriptors2,
+    id<MTLBuffer> keypoints2Buffer,
     const MatchOptions& options, MatchGuidedGeometry guided_geometry,
     const float matrix[9], float max_residual, bool reverse_guided,
-    std::vector<SIFTMatcherResult>* results) {
+    int direction) {
   const bool use_parallel_dot_pipeline =
       guided_geometry == MatchGuidedGeometry::NONE;
   id<MTLComputePipelineState> pipeline =
@@ -530,37 +538,8 @@ bool SiftMetalMatcherImpl::RunOneWay(
   if (!pipeline) {
     return false;
   }
-  if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {
-    results->clear();
-    return true;
-  }
-
-  id<MTLBuffer> descriptors1Buffer =
-      GetDescriptorBuffer(descriptors1, num_descriptors1);
-  id<MTLBuffer> descriptors2Buffer =
-      GetDescriptorBuffer(descriptors2, num_descriptors2);
-  if (!descriptors1Buffer || !descriptors2Buffer) {
-    return false;
-  }
 
   const bool guided = guided_geometry != MatchGuidedGeometry::NONE;
-  id<MTLBuffer> keypoints1Buffer = nil;
-  id<MTLBuffer> keypoints2Buffer = nil;
-  if (guided) {
-    if (!keypoints1 || !keypoints2) {
-      return false;
-    }
-    keypoints1Buffer =
-        GetKeypointBuffer(/*first_buffer=*/true, keypoints1, num_descriptors1);
-    keypoints2Buffer =
-        GetKeypointBuffer(/*first_buffer=*/false, keypoints2, num_descriptors2);
-  } else {
-    keypoints1Buffer = dummyKeypointBuffer_;
-    keypoints2Buffer = dummyKeypointBuffer_;
-  }
-  if (!keypoints1Buffer || !keypoints2Buffer) {
-    return false;
-  }
 
   SIFTMatcherParameters params = {};
   params.numDescriptors1 = static_cast<uint32_t>(num_descriptors1);
@@ -579,26 +558,25 @@ bool SiftMetalMatcherImpl::RunOneWay(
     std::memcpy(params.matrix, matrix, 9 * sizeof(float));
   }
 
-  if (!paramsBuffer_) {
-    paramsBuffer_ = [device_ newBufferWithLength:sizeof(params)
-                                         options:MTLResourceStorageModeShared];
+  DirectionResources& dir = directions_[direction];
+  if (!dir.paramsBuffer) {
+    dir.paramsBuffer =
+        [device_ newBufferWithLength:sizeof(params)
+                             options:MTLResourceStorageModeShared];
   }
   const size_t result_bytes =
       static_cast<size_t>(num_descriptors1) * sizeof(SIFTMatcherResult);
-  if (!resultsBuffer_ || resultsBufferCapacity_ < result_bytes) {
-    resultsBuffer_ = [device_ newBufferWithLength:result_bytes
-                                          options:MTLResourceStorageModeShared];
-    resultsBufferCapacity_ = resultsBuffer_ ? result_bytes : 0;
+  if (!dir.resultsBuffer || dir.resultsCapacity < result_bytes) {
+    dir.resultsBuffer =
+        [device_ newBufferWithLength:result_bytes
+                             options:MTLResourceStorageModeShared];
+    dir.resultsCapacity = dir.resultsBuffer ? result_bytes : 0;
   }
-  if (!paramsBuffer_ || !resultsBuffer_) {
+  if (!dir.paramsBuffer || !dir.resultsBuffer) {
     return false;
   }
-  std::memcpy(paramsBuffer_.contents, &params, sizeof(params));
+  std::memcpy(dir.paramsBuffer.contents, &params, sizeof(params));
 
-  id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
-  if (!commandBuffer) {
-    return false;
-  }
   id<MTLComputeCommandEncoder> encoder =
       [commandBuffer computeCommandEncoder];
   if (!encoder) {
@@ -609,8 +587,8 @@ bool SiftMetalMatcherImpl::RunOneWay(
   [encoder setBuffer:descriptors2Buffer offset:0 atIndex:1];
   [encoder setBuffer:keypoints1Buffer offset:0 atIndex:2];
   [encoder setBuffer:keypoints2Buffer offset:0 atIndex:3];
-  [encoder setBuffer:paramsBuffer_ offset:0 atIndex:4];
-  [encoder setBuffer:resultsBuffer_ offset:0 atIndex:5];
+  [encoder setBuffer:dir.paramsBuffer offset:0 atIndex:4];
+  [encoder setBuffer:dir.resultsBuffer offset:0 atIndex:5];
   if (use_parallel_dot_pipeline) {
     const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
         pipeline.maxTotalThreadsPerThreadgroup, SIFT_MATCHER_DOT_THREADS);
@@ -623,12 +601,6 @@ bool SiftMetalMatcherImpl::RunOneWay(
         threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
   }
   [encoder endEncoding];
-  if (!CommitAndWait(commandBuffer, @"matching")) {
-    return false;
-  }
-
-  results->resize(num_descriptors1);
-  std::memcpy(results->data(), resultsBuffer_.contents, result_bytes);
   return true;
 }
 
@@ -674,20 +646,64 @@ bool SiftMetalMatcherImpl::Match(
     return true;
   }
 
-  if (!RunOneWay(descriptors1, num_descriptors1, keypoints1,
-                 descriptors2, num_descriptors2, keypoints2, options,
-                 guided_geometry, matrix, max_residual,
-                 /*reverse_guided=*/false, &matches_1to2_)) {
+  id<MTLBuffer> descriptors1Buffer =
+      GetDescriptorBuffer(descriptors1, num_descriptors1);
+  id<MTLBuffer> descriptors2Buffer =
+      GetDescriptorBuffer(descriptors2, num_descriptors2);
+  if (!descriptors1Buffer || !descriptors2Buffer) {
     return false;
   }
 
+  // Upload each keypoint set once; the reverse pass binds the same buffers
+  // swapped instead of re-uploading into shared storage while the forward
+  // dispatch may still consume it.
+  id<MTLBuffer> keypoints1Buffer = dummyKeypointBuffer_;
+  id<MTLBuffer> keypoints2Buffer = dummyKeypointBuffer_;
+  if (guided_geometry != MatchGuidedGeometry::NONE) {
+    keypoints1Buffer =
+        GetKeypointBuffer(/*first_buffer=*/true, keypoints1, num_descriptors1);
+    keypoints2Buffer =
+        GetKeypointBuffer(/*first_buffer=*/false, keypoints2, num_descriptors2);
+  }
+  if (!keypoints1Buffer || !keypoints2Buffer) {
+    return false;
+  }
+
+  // Both directions are encoded into one command buffer with per-direction
+  // params/results buffers, so cross-checked matching costs a single
+  // synchronization instead of two.
+  id<MTLCommandBuffer> commandBuffer = [commandQueue_ commandBuffer];
+  if (!commandBuffer) {
+    return false;
+  }
+  if (!EncodeOneWay(commandBuffer,
+                    descriptors1Buffer, num_descriptors1, keypoints1Buffer,
+                    descriptors2Buffer, num_descriptors2, keypoints2Buffer,
+                    options, guided_geometry, matrix, max_residual,
+                    /*reverse_guided=*/false, /*direction=*/0)) {
+    return false;
+  }
   if (options.cross_check) {
-    if (!RunOneWay(descriptors2, num_descriptors2, keypoints2,
-                   descriptors1, num_descriptors1, keypoints1, options,
-                   guided_geometry, matrix, max_residual,
-                   /*reverse_guided=*/true, &matches_2to1_)) {
+    if (!EncodeOneWay(commandBuffer,
+                      descriptors2Buffer, num_descriptors2, keypoints2Buffer,
+                      descriptors1Buffer, num_descriptors1, keypoints1Buffer,
+                      options, guided_geometry, matrix, max_residual,
+                      /*reverse_guided=*/true, /*direction=*/1)) {
       return false;
     }
+  }
+  if (!CommitAndWait(commandBuffer, @"matching")) {
+    return false;
+  }
+
+  matches_1to2_.resize(num_descriptors1);
+  std::memcpy(matches_1to2_.data(), directions_[0].resultsBuffer.contents,
+              static_cast<size_t>(num_descriptors1) * sizeof(SIFTMatcherResult));
+  if (options.cross_check) {
+    matches_2to1_.resize(num_descriptors2);
+    std::memcpy(matches_2to1_.data(), directions_[1].resultsBuffer.contents,
+                static_cast<size_t>(num_descriptors2) *
+                    sizeof(SIFTMatcherResult));
   }
 
   matches->reserve(num_descriptors1);

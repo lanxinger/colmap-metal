@@ -633,7 +633,12 @@ bool SiftMetalMatcherImpl::Match(
       guided_geometry == MatchGuidedGeometry::NONE ||
       guided_geometry == MatchGuidedGeometry::EPIPOLAR ||
       guided_geometry == MatchGuidedGeometry::HOMOGRAPHY;
-  if (!matches || num_descriptors1 < 0 || num_descriptors2 < 0 ||
+  if (!matches) {
+    return false;
+  }
+  matches->clear();
+
+  if (num_descriptors1 < 0 || num_descriptors2 < 0 ||
       (num_descriptors1 > 0 && !descriptors1) ||
       (num_descriptors2 > 0 && !descriptors2) ||
       !valid_guided_geometry || !std::isfinite(options.max_ratio) ||
@@ -651,7 +656,6 @@ bool SiftMetalMatcherImpl::Match(
     }
   }
 
-  matches->clear();
   if (num_descriptors1 <= 0 || num_descriptors2 <= 0) {
     return true;
   }

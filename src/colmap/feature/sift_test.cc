@@ -44,6 +44,7 @@
 #include "thirdparty/SiftMetal/SiftMetal.h"
 #endif
 
+#include <array>
 #include <functional>
 
 namespace colmap {
@@ -244,6 +245,33 @@ TEST(ExtractSiftFeaturesMetal, RejectsUnsupportedFirstOctave) {
 
   sift_metal::SiftMetalExtractor extractor;
   EXPECT_FALSE(extractor.Init(options, 256, 256));
+}
+
+TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
+  sift_metal::SiftMetalMatcher matcher;
+  ASSERT_TRUE(matcher.Init());
+
+  std::array<uint8_t, 128> descriptor = {};
+  sift_metal::MatchOptions options;
+  std::vector<sift_metal::MatchResult> matches = {{0, 0}};
+
+  EXPECT_FALSE(matcher.Match(nullptr,
+                             1,
+                             descriptor.data(),
+                             1,
+                             options,
+                             &matches));
+  EXPECT_TRUE(matches.empty());
+
+  matches = {{0, 0}};
+  options.max_ratio = 0.0f;
+  EXPECT_FALSE(matcher.Match(descriptor.data(),
+                             1,
+                             descriptor.data(),
+                             1,
+                             options,
+                             &matches));
+  EXPECT_TRUE(matches.empty());
 }
 #endif
 

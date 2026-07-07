@@ -15,7 +15,7 @@ using namespace metal;
 kernel void nearestNeighborDownScale(
     texture2d_array<float, access::write> outputTexture [[texture(0)]],
     texture2d_array<float, access::read> inputTexture [[texture(1)]],
-    device NearestNeighborScaleParameters & parameters [[buffer(0)]],
+    constant NearestNeighborScaleParameters & parameters [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     const uint width = outputTexture.get_width();

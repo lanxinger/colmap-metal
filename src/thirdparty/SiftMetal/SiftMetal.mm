@@ -1204,9 +1204,15 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     }
   }
 
-  // Sort by scale (descending) and truncate to max_num_features.
-  if (options_.max_num_features > 0 &&
-      (int)result->keypoints.size() > options_.max_num_features) {
+  const int max_num_orientations =
+      options_.upright ? 1 : std::max(1, options_.max_num_orientations);
+  const int descriptor_limit = options_.max_num_features * max_num_orientations;
+
+  // Sort by scale (descending) and truncate after orientation expansion. This
+  // mirrors COLMAP's CPU SIFT semantics, where max_num_features limits detected
+  // keypoints and each keypoint may contribute multiple oriented descriptors.
+  if (descriptor_limit > 0 &&
+      static_cast<int>(result->keypoints.size()) > descriptor_limit) {
     // Create index array, sort by sigma descending.
     std::vector<int> indices(result->keypoints.size());
     std::iota(indices.begin(), indices.end(), 0);
@@ -1215,13 +1221,13 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                 return result->keypoints[a].sigma >
                        result->keypoints[b].sigma;
               });
-    indices.resize(options_.max_num_features);
+    indices.resize(descriptor_limit);
     std::sort(indices.begin(), indices.end()); // Restore order.
 
     std::vector<Keypoint> newKp;
     std::vector<float> newDesc;
-    newKp.reserve(options_.max_num_features);
-    newDesc.reserve(options_.max_num_features * 128);
+    newKp.reserve(descriptor_limit);
+    newDesc.reserve(descriptor_limit * 128);
     for (int idx : indices) {
       newKp.push_back(result->keypoints[idx]);
       newDesc.insert(newDesc.end(),

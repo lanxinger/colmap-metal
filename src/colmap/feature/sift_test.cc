@@ -270,6 +270,26 @@ TEST(ExtractSiftFeaturesMetal, ClearsResultOnInvalidInput) {
   EXPECT_TRUE(result.descriptors.empty());
 }
 
+TEST(ExtractSiftFeaturesMetal, AllowsOrientationExpandedDescriptorLimit) {
+  const Bitmap bitmap = CreateImageWithSquare(256);
+
+  sift_metal::Options options;
+  options.max_num_features = 1;
+  options.max_num_orientations = 2;
+
+  sift_metal::SiftMetalExtractor extractor;
+  ASSERT_TRUE(extractor.Init(options, bitmap.Width(), bitmap.Height()));
+
+  sift_metal::ExtractResult result;
+  ASSERT_TRUE(extractor.Extract(bitmap.RowMajorData().data(),
+                                bitmap.Width(),
+                                bitmap.Height(),
+                                &result));
+  EXPECT_GT(result.keypoints.size(), 1);
+  EXPECT_LE(result.keypoints.size(), 2);
+  EXPECT_EQ(result.descriptors.size(), result.keypoints.size() * 128);
+}
+
 TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
   sift_metal::SiftMetalMatcher matcher;
   ASSERT_TRUE(matcher.Init());

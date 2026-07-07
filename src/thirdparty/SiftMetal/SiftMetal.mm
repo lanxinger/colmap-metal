@@ -892,15 +892,22 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
 // ---------------------------------------------------------------------------
 void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
   int num_octaves = options_.num_octaves;
+  const int seed_w = static_cast<int>(float(w) / delta_min_);
+  const int seed_h = static_cast<int>(float(h) / delta_min_);
+  int max_usable_octaves = 0;
+  for (int ow = seed_w, oh = seed_h; ow >= 8 && oh >= 8; ow /= 2, oh /= 2) {
+    ++max_usable_octaves;
+  }
+
   if (num_octaves <= 0) {
     // Match SiftGPU's octave count: floor(log2(min(w,h))) - 3
     // But applied to the seed image dimensions (after upscaling).
-    int seed_min = std::min(
-        static_cast<int>(float(w) / delta_min_),
-        static_cast<int>(float(h) / delta_min_));
+    int seed_min = std::min(seed_w, seed_h);
     num_octaves = static_cast<int>(
         std::floor(std::log2(float(seed_min)))) - 3;
     num_octaves = std::max(1, num_octaves);
+  } else {
+    num_octaves = std::min(num_octaves, max_usable_octaves);
   }
 
   octaves_.clear();

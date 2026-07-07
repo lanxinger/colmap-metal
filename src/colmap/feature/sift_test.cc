@@ -248,6 +248,14 @@ TEST(ExtractSiftFeaturesMetal, RejectsUnsupportedFirstOctave) {
   EXPECT_FALSE(extractor.Init(options, 256, 256));
 }
 
+TEST(ExtractSiftFeaturesMetal, ClampsExcessiveOctavesToImageSize) {
+  sift_metal::Options options;
+  options.num_octaves = std::numeric_limits<int>::max();
+
+  sift_metal::SiftMetalExtractor extractor;
+  EXPECT_TRUE(extractor.Init(options, 64, 64));
+}
+
 TEST(ExtractSiftFeaturesMetal, ClearsResultOnInvalidInput) {
   sift_metal::Options options;
   sift_metal::SiftMetalExtractor extractor;

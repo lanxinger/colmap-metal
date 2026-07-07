@@ -188,7 +188,7 @@ class SiftMetalExtractorImpl {
   id<MTLComputePipelineState> siftDescriptorsPipeline_;
 
   // Seed textures
-  id<MTLTexture> luminosityTexture_;  // R32Float, input size
+  id<MTLTexture> luminosityTexture_;  // R8Unorm, input size
   id<MTLTexture> scaledTexture_;      // R32Float, seed size (2x)
   id<MTLTexture> seedTexture_;        // R32Float, seed size (2x)
   id<MTLTexture> seedConvWorkTexture_; // R32Float, seed size, private
@@ -210,9 +210,6 @@ class SiftMetalExtractorImpl {
   float sigma_input_ = 0.5f;
   int input_w_ = 0, input_h_ = 0;
   int seed_w_ = 0, seed_h_ = 0;
-
-  // Upload buffer
-  id<MTLBuffer> uploadBuffer_;
 };
 
 // ---------------------------------------------------------------------------
@@ -845,9 +842,10 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
   seed_w_ = static_cast<int>(float(max_w) / delta_min_);
   seed_h_ = static_cast<int>(float(max_h) / delta_min_);
 
-  // Create textures for the seed stage.
+  // Create textures for the seed stage. The grayscale input is uploaded
+  // directly as R8Unorm; texture reads return the pixel value / 255.
   luminosityTexture_ = MakeTexture2D(device_, max_w, max_h,
-                                      MTLPixelFormatR32Float,
+                                      MTLPixelFormatR8Unorm,
                                       MTLStorageModeShared);
   scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                   MTLPixelFormatR32Float,
@@ -873,14 +871,9 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
                            length:sizeof(uint32_t)
                           options:MTLResourceStorageModeShared];
 
-  // Upload buffer large enough for max image.
-  size_t maxPixels = (size_t)max_w * max_h;
-  uploadBuffer_ =
-      [device_ newBufferWithLength:maxPixels * sizeof(float)
-                           options:MTLResourceStorageModeShared];
   if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
       !seedConvWorkTexture_ || !seedConvWeightsBuffer_ ||
-      !seedConvParamsBuffer_ || !uploadBuffer_) {
+      !seedConvParamsBuffer_) {
     return false;
   }
 
@@ -1085,7 +1078,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     seed_h_ = static_cast<int>(float(h) / delta_min_);
 
     luminosityTexture_ = MakeTexture2D(device_, w, h,
-                                        MTLPixelFormatR32Float,
+                                        MTLPixelFormatR8Unorm,
                                         MTLStorageModeShared);
     scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                     MTLPixelFormatR32Float,
@@ -1096,15 +1089,8 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
                                           MTLPixelFormatR32Float,
                                           MTLStorageModePrivate);
-
-    size_t maxPixels = (size_t)w * h;
-    if (uploadBuffer_.length < maxPixels * sizeof(float)) {
-      uploadBuffer_ =
-          [device_ newBufferWithLength:maxPixels * sizeof(float)
-                               options:MTLResourceStorageModeShared];
-    }
     if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
-        !seedConvWorkTexture_ || !uploadBuffer_) {
+        !seedConvWorkTexture_) {
       return false;
     }
 
@@ -1118,17 +1104,12 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     return true;
   }
 
-  // Convert uint8 grayscale to float and upload to luminosity texture.
-  float* uploadPtr = static_cast<float*>(uploadBuffer_.contents);
-  size_t npixels = (size_t)w * h;
-  for (size_t i = 0; i < npixels; ++i) {
-    uploadPtr[i] = static_cast<float>(data[i]) / 255.0f;
-  }
+  // Upload uint8 grayscale directly; R8Unorm reads yield value / 255.
   MTLRegion region = MTLRegionMake2D(0, 0, w, h);
   [luminosityTexture_ replaceRegion:region
                         mipmapLevel:0
-                          withBytes:uploadPtr
-                        bytesPerRow:w * sizeof(float)];
+                          withBytes:data
+                        bytesPerRow:w];
 
   // Phase 1: Build scale-space pyramid (DoG + gradients + extrema).
   {
@@ -1255,8 +1236,9 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
 // EncodeSeedTexture: upscale grayscale input + Gaussian blur.
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
-  // Bilinear upscale luminosity → scaled.
-  if (seed_w_ != input_w_ || seed_h_ != input_h_) {
+  // Bilinear upscale luminosity → scaled. Also converts R8Unorm → R32Float;
+  // at equal sizes the kernel samples exact texel centers, i.e. a plain copy.
+  {
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     if (!enc) {
       return false;
@@ -1270,14 +1252,6 @@ bool SiftMetalExtractorImpl::EncodeSeedTexture(id<MTLCommandBuffer> cb) {
         (NSUInteger)(seed_h_ + 15) / 16, 1};
     [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     [enc endEncoding];
-  } else {
-    // Same size: just copy.
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    if (!blit) {
-      return false;
-    }
-    [blit copyFromTexture:luminosityTexture_ toTexture:scaledTexture_];
-    [blit endEncoding];
   }
 
   // Gaussian blur scaled → seed (separable 1D convolution).

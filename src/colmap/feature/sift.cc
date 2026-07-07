@@ -55,6 +55,7 @@
 #include "thirdparty/VLFeat/sift.h"
 
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <locale>
 #include <map>
@@ -1456,6 +1457,27 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
       return;
     }
 
+    const Eigen::Matrix3f E_or_F =
+        use_essential_matrix
+            ? Eigen::Matrix3f(two_view_geometry->E->cast<float>())
+        : use_fundamental_matrix
+            ? Eigen::Matrix3f(two_view_geometry->F->cast<float>())
+            : Eigen::Matrix3f::Zero();
+    const Eigen::Matrix3f H =
+        use_homography ? Eigen::Matrix3f(two_view_geometry->H->cast<float>())
+                       : Eigen::Matrix3f::Zero();
+    const Eigen::Matrix3f guided_matrix = use_homography ? H : E_or_F;
+
+    const float max_residual =
+        use_essential_matrix
+            ? static_cast<float>(ComputeNormalizedGuidedMatchingMaxResidual(
+                  *image1.camera, *image2.camera, max_error))
+            : static_cast<float>(max_error * max_error);
+    if (!guided_matrix.allFinite() || !std::isfinite(max_residual) ||
+        max_residual < 0.0f) {
+      return;
+    }
+
     const FeatureKeypoints normalized_keypoints1 =
         use_essential_matrix
             ? NormalizeFeatureKeypoints(*image1.camera, *image1.keypoints)
@@ -1474,23 +1496,7 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     const std::vector<sift_metal::MatchKeypoint> metal_keypoints2 =
         ToMetalMatchKeypoints(keypoints2);
 
-    const Eigen::Matrix3f E_or_F =
-        use_essential_matrix
-            ? Eigen::Matrix3f(two_view_geometry->E->cast<float>())
-        : use_fundamental_matrix
-            ? Eigen::Matrix3f(two_view_geometry->F->cast<float>())
-            : Eigen::Matrix3f::Zero();
-    const Eigen::Matrix3f H =
-        use_homography ? Eigen::Matrix3f(two_view_geometry->H->cast<float>())
-                       : Eigen::Matrix3f::Zero();
-    const std::array<float, 9> matrix =
-        ToRowMajorArray(use_homography ? H : E_or_F);
-
-    const float max_residual =
-        use_essential_matrix
-            ? static_cast<float>(ComputeNormalizedGuidedMatchingMaxResidual(
-                  *image1.camera, *image2.camera, max_error))
-            : static_cast<float>(max_error * max_error);
+    const std::array<float, 9> matrix = ToRowMajorArray(guided_matrix);
 
     const sift_metal::MatchOptions match_options{
         static_cast<float>(options_.sift->max_ratio),

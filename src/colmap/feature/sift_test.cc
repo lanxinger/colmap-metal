@@ -46,6 +46,7 @@
 
 #include <array>
 #include <functional>
+#include <limits>
 
 namespace colmap {
 namespace {
@@ -1107,6 +1108,41 @@ TEST(MatchGuidedSiftFeaturesGPU, Nominal) {
     EXPECT_EQ(two_view_geometry.inlier_matches.size(), 0);
   });
 }
+
+#if defined(COLMAP_METAL_ENABLED)
+TEST(MatchGuidedSiftFeaturesGPU, RejectsNonFiniteGeometry) {
+  RunGpuTest([] {
+    Camera camera = Camera::CreateFromModelId(
+        1, CameraModelId::kSimpleRadial, 100.0, 100, 200);
+    const FeatureMatcher::Image image1 = {
+        /*image_id=*/1,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{1, 0}, {2, 0}}),
+        std::make_shared<FeatureDescriptors>(
+            CreateRandomFeatureDescriptors(2))};
+    const FeatureMatcher::Image image2 = {
+        /*image_id=*/2,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{2, 0}, {1, 0}}),
+        std::make_shared<FeatureDescriptors>(
+            CreateReversedDescriptors(*image1.descriptors))};
+
+    FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+    options.use_gpu = true;
+    options.max_num_matches = 1000;
+    auto matcher = THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+
+    TwoViewGeometry two_view_geometry = CreatePlanarTwoViewGeometry();
+    (*two_view_geometry.H)(0, 0) = std::numeric_limits<double>::quiet_NaN();
+    two_view_geometry.inlier_matches = {FeatureMatch{0, 1}};
+
+    matcher->MatchGuided(4.0, image1, image2, &two_view_geometry);
+    EXPECT_TRUE(two_view_geometry.inlier_matches.empty());
+  });
+}
+#endif
 
 TEST(MatchGuidedSiftFeaturesGPU, EssentialMatrix) {
   RunGpuTest([] {

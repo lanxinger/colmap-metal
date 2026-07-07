@@ -180,13 +180,10 @@ kernel void siftDescriptors(
     const float histogramWidth = 3.0 * scale; // 3.0 constant from Whess (OpenSIFT)
     const int radius = histogramWidth * sqrt(2.0) * ((float)d + 1.0) * 0.5 + 0.5;
     
-    const int minX = radius;
-    const int minY = radius;
-    const int maxX = parameters.width - 1 - radius;
-    const int maxY = parameters.height - 1 - radius;
     const int maxScale = parameters.scalesPerOctave + 2;
 
-    if (px < minX || py < minY || px > maxX || py > maxY ||
+    if (px < 0.0f || py < 0.0f ||
+        px >= (float)parameters.width || py >= (float)parameters.height ||
         input.scale < 0 || input.scale > maxScale) {
         results[gid] = result;
         return;
@@ -202,6 +199,13 @@ kernel void siftDescriptors(
 
     for (int j = -radius; j <= +radius; j++) {
         for (int i = -radius; i <= +radius; i++) {
+            const int sampleX = int(px + j);
+            const int sampleY = int(py + i);
+            if (sampleX < 1 || sampleY < 1 ||
+                sampleX >= parameters.width - 1 ||
+                sampleY >= parameters.height - 1) {
+                continue;
+            }
 
             float rx = ((float)j * cosT - (float)i * sinT) / histogramWidth;
             float ry = ((float)j * sinT + (float)i * cosT) / histogramWidth;
@@ -212,7 +216,7 @@ kernel void siftDescriptors(
             }
             
             float2 g = gradientTextures.read(
-                uint2(uint(px + j), uint(py + i)), input.scale).rg;
+                uint2(uint(sampleX), uint(sampleY)), input.scale).rg;
             if (!all(isfinite(g)) || g.g <= 0.0f) {
                 continue;
             }

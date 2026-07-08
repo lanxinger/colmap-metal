@@ -1298,14 +1298,16 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
   // keypoints and each keypoint may contribute multiple oriented descriptors.
   if (descriptor_limit > 0 &&
       static_cast<int>(result->keypoints.size()) > descriptor_limit) {
-    // Create index array, sort by sigma descending.
+    // Select the descriptor_limit largest-sigma keypoints.
     std::vector<int> indices(result->keypoints.size());
     std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(),
-              [&](int a, int b) {
-                return result->keypoints[a].sigma >
-                       result->keypoints[b].sigma;
-              });
+    std::nth_element(indices.begin(),
+                     indices.begin() + descriptor_limit,
+                     indices.end(),
+                     [&](int a, int b) {
+                       return result->keypoints[a].sigma >
+                              result->keypoints[b].sigma;
+                     });
     indices.resize(descriptor_limit);
     std::sort(indices.begin(), indices.end()); // Restore order.
 

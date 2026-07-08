@@ -805,15 +805,11 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
       (*keypoints)[i] = FeatureKeypoint(kp.x, kp.y, kp.sigma, kp.orientation);
     }
 
-    // Normalize and quantize descriptors.
-    FeatureDescriptorsFloatData descriptors_float(num_features,
-                                                   kSiftDescriptorDim);
-    for (size_t i = 0; i < num_features; ++i) {
-      for (int j = 0; j < kSiftDescriptorDim; ++j) {
-        descriptors_float(i, j) =
-            metal_result.descriptors[i * kSiftDescriptorDim + j];
-      }
-    }
+    // Normalize and quantize descriptors. The Metal extractor returns
+    // row-major [num_features x 128] floats, matching the Eigen layout.
+    FeatureDescriptorsFloatData descriptors_float =
+        Eigen::Map<const FeatureDescriptorsFloatData>(
+            metal_result.descriptors.data(), num_features, kSiftDescriptorDim);
 
     if (options_.sift->normalization ==
         SiftExtractionOptions::Normalization::L2) {

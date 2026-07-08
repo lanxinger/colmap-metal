@@ -11,6 +11,8 @@
 
 #define SIFT_MATCHER_DESCRIPTOR_DIM 128
 #define SIFT_MATCHER_DOT_THREADS 256
+// Query descriptors processed per threadgroup in siftMatchBestDotParallel.
+#define SIFT_MATCHER_DOT_BLOCK 8
 
 #define SIFT_MATCHER_DISTANCE_DOT_PRODUCT 0
 #define SIFT_MATCHER_DISTANCE_L2 1

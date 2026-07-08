@@ -591,7 +591,11 @@ bool SiftMetalMatcherImpl::EncodeOneWay(
   if (use_parallel_dot_pipeline) {
     const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
         pipeline.maxTotalThreadsPerThreadgroup, SIFT_MATCHER_DOT_THREADS);
-    [encoder dispatchThreadgroups:MTLSizeMake(num_descriptors1, 1, 1)
+    const NSUInteger numBlocks =
+        (static_cast<NSUInteger>(num_descriptors1) + SIFT_MATCHER_DOT_BLOCK -
+         1) /
+        SIFT_MATCHER_DOT_BLOCK;
+    [encoder dispatchThreadgroups:MTLSizeMake(numBlocks, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
   } else {
     const NSUInteger threadsPerThreadgroup =

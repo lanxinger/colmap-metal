@@ -21,7 +21,9 @@ def parse_args() -> argparse.Namespace:
             "comparing CPU matching with Metal matching."
         )
     )
-    parser.add_argument("image_path", type=Path, help="Directory of input images")
+    parser.add_argument(
+        "image_path", type=Path, help="Directory of input images"
+    )
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -61,7 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-geometric-verification",
         action="store_true",
-        help="Pass FeatureMatching.skip_geometric_verification to matching runs",
+        help="Pass FeatureMatching.skip_geometric_verification to "
+        "matching runs",
     )
     parser.add_argument(
         "--keep-workspace",
@@ -125,9 +128,13 @@ def db_stats(database: Path) -> dict[str, int]:
     with sqlite3.connect(database) as conn:
         return {
             "images": db_scalar(conn, "select count(*) from images"),
-            "keypoints": db_scalar(conn, "select coalesce(sum(rows), 0) from keypoints"),
+            "keypoints": db_scalar(
+                conn, "select coalesce(sum(rows), 0) from keypoints"
+            ),
             "match_pairs": db_scalar(conn, "select count(*) from matches"),
-            "raw_matches": db_scalar(conn, "select coalesce(sum(rows), 0) from matches"),
+            "raw_matches": db_scalar(
+                conn, "select coalesce(sum(rows), 0) from matches"
+            ),
             "verified_pairs": db_scalar(
                 conn, "select count(*) from two_view_geometries where rows > 0"
             ),
@@ -265,7 +272,9 @@ def run_automatic_benchmark(
         "db_stats": db_stats(workspace / "database.db"),
     }
     result.update(
-        run_model_analyzer_if_available(colmap, workspace / "sparse/0", repo_root)
+        run_model_analyzer_if_available(
+            colmap, workspace / "sparse/0", repo_root
+        )
     )
     return result
 
@@ -386,7 +395,8 @@ def main() -> int:
     print(json.dumps(result, indent=2, sort_keys=True))
     print(
         f"matching speedup: {speedup:.2f}x "
-        f"({float(before_seconds):.2f}s cpu / {float(after_seconds):.2f}s metal)",
+        f"({float(before_seconds):.2f}s cpu / "
+        f"{float(after_seconds):.2f}s metal)",
         file=sys.stderr,
     )
     return 0
@@ -397,4 +407,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as error:
         print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from error

@@ -793,7 +793,8 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
 
     sift_metal::ExtractResult metal_result;
     if (!extractor_.Extract(bitmap.RowMajorData().data(),
-                            bitmap.Width(), bitmap.Height(),
+                            bitmap.Width(),
+                            bitmap.Height(),
                             &metal_result)) {
       return false;
     }
@@ -1518,8 +1519,7 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
   };
 
   const std::vector<sift_metal::MatchKeypoint>& GetRawMetalKeypoints(
-      const Image& image,
-      std::vector<sift_metal::MatchKeypoint>* scratch) {
+      const Image& image, std::vector<sift_metal::MatchKeypoint>* scratch) {
     if (image.image_id == kInvalidImageId) {
       ToMetalMatchKeypoints(*image.keypoints, scratch);
       return *scratch;
@@ -1538,8 +1538,7 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
   }
 
   const std::vector<sift_metal::MatchKeypoint>& GetNormalizedMetalKeypoints(
-      const Image& image,
-      std::vector<sift_metal::MatchKeypoint>* scratch) {
+      const Image& image, std::vector<sift_metal::MatchKeypoint>* scratch) {
     if (image.image_id == kInvalidImageId) {
       const FeatureKeypoints normalized_keypoints =
           NormalizeFeatureKeypoints(*image.camera, *image.keypoints);

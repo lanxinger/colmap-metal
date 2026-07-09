@@ -281,10 +281,8 @@ TEST(ExtractSiftFeaturesMetal, AllowsOrientationExpandedDescriptorLimit) {
   ASSERT_TRUE(extractor.Init(options, bitmap.Width(), bitmap.Height()));
 
   sift_metal::ExtractResult result;
-  ASSERT_TRUE(extractor.Extract(bitmap.RowMajorData().data(),
-                                bitmap.Width(),
-                                bitmap.Height(),
-                                &result));
+  ASSERT_TRUE(extractor.Extract(
+      bitmap.RowMajorData().data(), bitmap.Width(), bitmap.Height(), &result));
   EXPECT_GT(result.keypoints.size(), 1);
   EXPECT_LE(result.keypoints.size(), 2);
   EXPECT_EQ(result.descriptors.size(), result.keypoints.size() * 128);
@@ -298,29 +296,20 @@ TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
   sift_metal::MatchOptions options;
   std::vector<sift_metal::MatchResult> matches = {{0, 0}};
 
-  EXPECT_FALSE(matcher.Match(nullptr,
-                             1,
-                             descriptor.data(),
-                             1,
-                             options,
-                             &matches));
+  EXPECT_FALSE(
+      matcher.Match(nullptr, 1, descriptor.data(), 1, options, &matches));
   EXPECT_TRUE(matches.empty());
 
   matches = {{0, 0}};
   options.max_ratio = 0.0f;
-  EXPECT_FALSE(matcher.Match(descriptor.data(),
-                             1,
-                             descriptor.data(),
-                             1,
-                             options,
-                             &matches));
+  EXPECT_FALSE(matcher.Match(
+      descriptor.data(), 1, descriptor.data(), 1, options, &matches));
   EXPECT_TRUE(matches.empty());
 
   matches = {{0, 0}};
   options.max_ratio = 0.8f;
-  const std::array<float, 9> identity = {1.0f, 0.0f, 0.0f,
-                                         0.0f, 1.0f, 0.0f,
-                                         0.0f, 0.0f, 1.0f};
+  const std::array<float, 9> identity = {
+      1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
   EXPECT_FALSE(matcher.MatchGuided(descriptor.data(),
                                    1,
                                    nullptr,
@@ -913,12 +902,14 @@ TEST(MatchSiftFeaturesGPU, RefreshesReusedDescriptorPointer) {
         std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2));
     auto descriptors2 = std::make_shared<FeatureDescriptors>(
         CreateReversedDescriptors(*descriptors1));
-    const FeatureMatcher::Image image1 = {
-        /*image_id=*/1, /*camera=*/&camera, /*keypoints=*/nullptr,
-        descriptors1};
-    const FeatureMatcher::Image image2 = {
-        /*image_id=*/2, /*camera=*/&camera, /*keypoints=*/nullptr,
-        descriptors2};
+    const FeatureMatcher::Image image1 = {/*image_id=*/1,
+                                          /*camera=*/&camera,
+                                          /*keypoints=*/nullptr,
+                                          descriptors1};
+    const FeatureMatcher::Image image2 = {/*image_id=*/2,
+                                          /*camera=*/&camera,
+                                          /*keypoints=*/nullptr,
+                                          descriptors2};
 
     FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
     options.use_gpu = true;

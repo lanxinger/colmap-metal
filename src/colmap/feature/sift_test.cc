@@ -103,6 +103,8 @@ void ExpectReversedMatches(const FeatureMatches& matches) {
   EXPECT_EQ(matches[1].point2D_idx2, 0);
 }
 
+#if defined(COLMAP_METAL_ENABLED)
+// Only used by the Metal-specific matcher tests below.
 void ExpectIdentityMatches(const FeatureMatches& matches) {
   EXPECT_EQ(matches.size(), 2);
   EXPECT_EQ(matches[0].point2D_idx1, 0);
@@ -110,6 +112,7 @@ void ExpectIdentityMatches(const FeatureMatches& matches) {
   EXPECT_EQ(matches[1].point2D_idx1, 1);
   EXPECT_EQ(matches[1].point2D_idx2, 1);
 }
+#endif
 
 void ExpectReversedInlierMatches(const TwoViewGeometry& two_view_geometry) {
   EXPECT_EQ(two_view_geometry.inlier_matches.size(), 2);

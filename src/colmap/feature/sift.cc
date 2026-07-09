@@ -1670,19 +1670,23 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
     }
 
     if (prev_image_id1_ == kInvalidImageId || prev_is_guided_ ||
-        prev_image_id1_ != image1.image_id) {
+        prev_image_id1_ != image1.image_id ||
+        prev_descriptors1_ != image1.descriptors.get()) {
       WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
       sift_match_gpu_.SetDescriptors(
           0, image1.descriptors->data.rows(), image1.descriptors->data.data());
       prev_image_id1_ = image1.image_id;
+      prev_descriptors1_ = image1.descriptors.get();
     }
 
     if (prev_image_id2_ == kInvalidImageId || prev_is_guided_ ||
-        prev_image_id2_ != image2.image_id) {
+        prev_image_id2_ != image2.image_id ||
+        prev_descriptors2_ != image2.descriptors.get()) {
       WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
       sift_match_gpu_.SetDescriptors(
           1, image2.descriptors->data.rows(), image2.descriptors->data.data());
       prev_image_id2_ = image2.image_id;
+      prev_descriptors2_ = image2.descriptors.get();
     }
 
     prev_is_guided_ = false;
@@ -1741,6 +1745,8 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
 
     if (prev_image_id1_ == kInvalidImageId || !prev_is_guided_ ||
         prev_image_id1_ != image1.image_id ||
+        prev_descriptors1_ != image1.descriptors.get() ||
+        prev_keypoints1_ != image1.keypoints.get() ||
         use_essential_matrix != prev_use_essential_matrix_) {
       WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
       constexpr size_t kIndex = 0;
@@ -1761,10 +1767,14 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
             kFeatureShapeNumElems);
       }
       prev_image_id1_ = image1.image_id;
+      prev_descriptors1_ = image1.descriptors.get();
+      prev_keypoints1_ = image1.keypoints.get();
     }
 
     if (prev_image_id2_ == kInvalidImageId || !prev_is_guided_ ||
         prev_image_id2_ != image2.image_id ||
+        prev_descriptors2_ != image2.descriptors.get() ||
+        prev_keypoints2_ != image2.keypoints.get() ||
         use_essential_matrix != prev_use_essential_matrix_) {
       WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
       constexpr size_t kIndex = 1;
@@ -1785,6 +1795,8 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
             kFeatureShapeNumElems);
       }
       prev_image_id2_ = image2.image_id;
+      prev_descriptors2_ = image2.descriptors.get();
+      prev_keypoints2_ = image2.keypoints.get();
     }
 
     prev_is_guided_ = true;
@@ -1868,6 +1880,12 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
   bool prev_use_essential_matrix_ = false;
   image_t prev_image_id1_ = kInvalidImageId;
   image_t prev_image_id2_ = kInvalidImageId;
+  // Data uploaded for the previous image ids. An image may be re-posted with
+  // the same id but updated keypoints/descriptors, which must be re-uploaded.
+  const FeatureKeypoints* prev_keypoints1_ = nullptr;
+  const FeatureKeypoints* prev_keypoints2_ = nullptr;
+  const FeatureDescriptors* prev_descriptors1_ = nullptr;
+  const FeatureDescriptors* prev_descriptors2_ = nullptr;
 };
 #endif  // COLMAP_GPU_ENABLED && !COLMAP_METAL_ENABLED
 

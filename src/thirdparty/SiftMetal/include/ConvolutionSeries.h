@@ -11,6 +11,9 @@
 #define ConvolutionSeries_h
 
 #define CONVOLUTION_WEIGHTS_LENGTH 32
+// Consecutive outputs computed per thread along the filter axis; interior
+// threads share the overlapping tap window instead of re-reading it.
+#define CONVOLUTION_OUTPUTS_PER_THREAD 4
 
 
 struct ConvolutionParameters {

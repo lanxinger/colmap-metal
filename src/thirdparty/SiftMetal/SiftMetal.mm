@@ -1517,8 +1517,13 @@ void SiftMetalExtractorImpl::EncodeGaussianSeries(
   int w = oct.width;
   int h = oct.height;
   MTLSize tg = {16, 16, 1};
-  MTLSize grid = {(NSUInteger)(w + 15) / 16,
-                  (NSUInteger)(h + 15) / 16, 1};
+  // Each thread produces CONVOLUTION_OUTPUTS_PER_THREAD outputs along the
+  // filter axis, so that axis needs proportionally fewer threadgroups.
+  constexpr NSUInteger kBlock = 16 * CONVOLUTION_OUTPUTS_PER_THREAD;
+  MTLSize gridX = {((NSUInteger)w + kBlock - 1) / kBlock,
+                   (NSUInteger)(h + 15) / 16, 1};
+  MTLSize gridY = {(NSUInteger)(w + 15) / 16,
+                   ((NSUInteger)h + kBlock - 1) / kBlock, 1};
 
   for (auto& pair : oct.convPairs) {
     // X pass: gaussian → work
@@ -1526,14 +1531,14 @@ void SiftMetalExtractorImpl::EncodeGaussianSeries(
     [enc setTexture:oct.convWorkTexture atIndex:0];
     [enc setTexture:oct.gaussianTextures atIndex:1];
     [enc setBuffer:pair.paramsX offset:0 atIndex:0];
-    [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    [enc dispatchThreadgroups:gridX threadsPerThreadgroup:tg];
 
     // Y pass: work → gaussian
     [enc setComputePipelineState:convolutionSeriesYPipeline_];
     [enc setTexture:oct.gaussianTextures atIndex:0];
     [enc setTexture:oct.convWorkTexture atIndex:1];
     [enc setBuffer:pair.paramsY offset:0 atIndex:0];
-    [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
+    [enc dispatchThreadgroups:gridY threadsPerThreadgroup:tg];
   }
 }
 

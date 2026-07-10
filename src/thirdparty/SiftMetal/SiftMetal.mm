@@ -9,6 +9,7 @@
 // Shared C headers for Metal shader parameter structs.
 #include "include/ConvolutionSeries.h"
 #include "include/NearestNeighbor.h"
+#include "include/SeedStage.h"
 #include "include/SIFTDescriptor.h"
 #include "include/SIFTExtrema.h"
 #include "include/SIFTInterpolate.h"
@@ -61,7 +62,9 @@ static std::vector<float> GaussianWeights(float sigma) {
 struct Octave {
   int o = 0;                 // octave index
   float delta = 0.0f;        // sampling distance
-  int width = 0, height = 0; // dimensions at this octave
+  // Logical dimensions of the current image at this octave. Textures are
+  // allocated once for the maximum image size and reused across images.
+  int width = 0, height = 0;
   int num_scales = 0;        // scales per octave (typically 3)
   std::vector<float> sigmas;  // sigma values for each gaussian
 
@@ -141,6 +144,9 @@ class SiftMetalExtractorImpl {
 
  private:
   void SetupOctaves(int w, int h);
+  // Updates logical dimensions and shader parameters for a new image size
+  // without reallocating textures. Requires w <= alloc_w_ and h <= alloc_h_.
+  void ConfigureForSize(int w, int h);
   void SetupOctave(Octave& oct, int o, float delta, int w, int h,
                    int num_scales, const std::vector<float>& sigmas);
 
@@ -204,9 +210,11 @@ class SiftMetalExtractorImpl {
   id<MTLTexture> seedTexture_;        // R16Float, seed size (2x)
   id<MTLTexture> seedConvWorkTexture_; // R16Float, seed size, private
 
-  // Seed Gaussian blur convolution buffers
+  // Seed-stage parameter buffers
   id<MTLBuffer> seedConvWeightsBuffer_;
   id<MTLBuffer> seedConvParamsBuffer_;
+  id<MTLBuffer> bilinearParamsBuffer_;
+  int seed_conv_weight_count_ = 0;
 
   // Octaves
   std::vector<Octave> octaves_;
@@ -221,6 +229,11 @@ class SiftMetalExtractorImpl {
   float sigma_input_ = 0.5f;
   int input_w_ = 0, input_h_ = 0;
   int seed_w_ = 0, seed_h_ = 0;
+  // Allocated (physical) texture dimensions; logical sizes never exceed them.
+  int alloc_w_ = 0, alloc_h_ = 0;
+  // Octaves in use for the current image size; octaves_ holds the physical
+  // maximum.
+  size_t num_active_octaves_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -884,6 +897,8 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
 
   input_w_ = max_w;
   input_h_ = max_h;
+  alloc_w_ = max_w;
+  alloc_h_ = max_h;
   seed_w_ = static_cast<int>(float(max_w) / delta_min_);
   seed_h_ = static_cast<int>(float(max_h) / delta_min_);
 
@@ -910,23 +925,28 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
       [device_ newBufferWithBytes:seedWeights.data()
                            length:seedWeights.size() * sizeof(float)
                           options:MTLResourceStorageModeShared];
-  uint32_t seedWeightCount = static_cast<uint32_t>(seedWeights.size());
+  seed_conv_weight_count_ = static_cast<int>(seedWeights.size());
+  // Contents are set per image size by ConfigureForSize.
   seedConvParamsBuffer_ =
-      [device_ newBufferWithBytes:&seedWeightCount
-                           length:sizeof(uint32_t)
-                          options:MTLResourceStorageModeShared];
+      [device_ newBufferWithLength:sizeof(SeedConvolutionParameters)
+                           options:MTLResourceStorageModeShared];
+  bilinearParamsBuffer_ =
+      [device_ newBufferWithLength:sizeof(BilinearUpScaleParameters)
+                           options:MTLResourceStorageModeShared];
 
   if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
       !seedConvWorkTexture_ || !seedConvWeightsBuffer_ ||
-      !seedConvParamsBuffer_) {
+      !seedConvParamsBuffer_ || !bilinearParamsBuffer_) {
     return false;
   }
 
-  // Setup octaves.
+  // Setup octaves at the maximum (allocated) size, then configure the
+  // logical size, which starts out equal to the allocation.
   SetupOctaves(max_w, max_h);
   if (!OctavesResourcesReady(octaves_)) {
     return false;
   }
+  ConfigureForSize(max_w, max_h);
 
   return true;
 }
@@ -1003,6 +1023,10 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
   NearestNeighborScaleParameters downscale_params = {};
   downscale_params.inputSlice = static_cast<int32_t>(num_scales);
   downscale_params.outputSlice = 0;
+  downscale_params.inputWidth = static_cast<int32_t>(w * 2);
+  downscale_params.inputHeight = static_cast<int32_t>(h * 2);
+  downscale_params.outputWidth = static_cast<int32_t>(w);
+  downscale_params.outputHeight = static_cast<int32_t>(h);
   oct.downscaleParamsBuffer =
       [device_ newBufferWithBytes:&downscale_params
                            length:sizeof(NearestNeighborScaleParameters)
@@ -1027,6 +1051,8 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
     paramsX.inputDepth = static_cast<int32_t>(s - 1);
     paramsX.outputDepth = 0;
     paramsX.count = static_cast<int32_t>(weight_count);
+    paramsX.width = static_cast<int32_t>(w);
+    paramsX.height = static_cast<int32_t>(h);
     std::memcpy(paramsX.weights, weights.data(), weight_count * sizeof(float));
     oct.convPairs[s - 1].paramsX =
         [device_ newBufferWithBytes:&paramsX
@@ -1038,6 +1064,8 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
     paramsY.inputDepth = 0;
     paramsY.outputDepth = static_cast<int32_t>(s);
     paramsY.count = static_cast<int32_t>(weight_count);
+    paramsY.width = static_cast<int32_t>(w);
+    paramsY.height = static_cast<int32_t>(h);
     std::memcpy(paramsY.weights, weights.data(), weight_count * sizeof(float));
     oct.convPairs[s - 1].paramsY =
         [device_ newBufferWithBytes:&paramsY
@@ -1098,6 +1126,82 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 }
 
 // ---------------------------------------------------------------------------
+// ConfigureForSize: adjust logical dimensions for a new image size. Textures
+// stay at their allocated size; only shader parameters and dispatch extents
+// change, so switching sizes (e.g. portrait/landscape) costs no reallocation.
+// ---------------------------------------------------------------------------
+void SiftMetalExtractorImpl::ConfigureForSize(int w, int h) {
+  input_w_ = w;
+  input_h_ = h;
+  seed_w_ = static_cast<int>(float(w) / delta_min_);
+  seed_h_ = static_cast<int>(float(h) / delta_min_);
+
+  auto* bilinear = static_cast<BilinearUpScaleParameters*>(
+      bilinearParamsBuffer_.contents);
+  bilinear->inputWidth = static_cast<int32_t>(w);
+  bilinear->inputHeight = static_cast<int32_t>(h);
+  bilinear->outputWidth = static_cast<int32_t>(seed_w_);
+  bilinear->outputHeight = static_cast<int32_t>(seed_h_);
+
+  auto* seedConv = static_cast<SeedConvolutionParameters*>(
+      seedConvParamsBuffer_.contents);
+  seedConv->count = static_cast<int32_t>(seed_conv_weight_count_);
+  seedConv->width = static_cast<int32_t>(seed_w_);
+  seedConv->height = static_cast<int32_t>(seed_h_);
+
+  // Number of usable octaves for these dimensions; mirrors SetupOctaves.
+  int num_octaves = options_.num_octaves;
+  if (num_octaves <= 0) {
+    const int seed_min = std::min(seed_w_, seed_h_);
+    num_octaves =
+        static_cast<int>(std::floor(std::log2(float(seed_min)))) - 3;
+    num_octaves = std::max(1, num_octaves);
+  } else {
+    int max_usable_octaves = 0;
+    for (int ow = seed_w_, oh = seed_h_; ow >= 8 && oh >= 8;
+         ow /= 2, oh /= 2) {
+      ++max_usable_octaves;
+    }
+    num_octaves = std::min(num_octaves, max_usable_octaves);
+  }
+  num_octaves = std::min<int>(num_octaves, static_cast<int>(octaves_.size()));
+
+  num_active_octaves_ = 0;
+  int prev_w = seed_w_;
+  int prev_h = seed_h_;
+  for (int o = 0; o < num_octaves; ++o) {
+    const float delta = delta_min_ * std::pow(2.0f, float(o));
+    const int ow = static_cast<int>(float(w) / delta);
+    const int oh = static_cast<int>(float(h) / delta);
+    if (ow < 8 || oh < 8) {
+      break;
+    }
+
+    Octave& oct = octaves_[o];
+    oct.width = ow;
+    oct.height = oh;
+    for (auto& pair : oct.convPairs) {
+      auto* px = static_cast<ConvolutionParameters*>(pair.paramsX.contents);
+      px->width = static_cast<int32_t>(ow);
+      px->height = static_cast<int32_t>(oh);
+      auto* py = static_cast<ConvolutionParameters*>(pair.paramsY.contents);
+      py->width = static_cast<int32_t>(ow);
+      py->height = static_cast<int32_t>(oh);
+    }
+    auto* downscale = static_cast<NearestNeighborScaleParameters*>(
+        oct.downscaleParamsBuffer.contents);
+    downscale->inputWidth = static_cast<int32_t>(prev_w);
+    downscale->inputHeight = static_cast<int32_t>(prev_h);
+    downscale->outputWidth = static_cast<int32_t>(ow);
+    downscale->outputHeight = static_cast<int32_t>(oh);
+
+    prev_w = ow;
+    prev_h = oh;
+    ++num_active_octaves_;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Extract
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
@@ -1113,37 +1217,44 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     return false;
   }
 
-  // Recreate textures if image size changed.
+  // Reconfigure for a changed image size. Textures are only reallocated if
+  // the image exceeds the current allocation, which normal usage never hits
+  // because Init sizes everything for the maximum image dimension.
   if (w != input_w_ || h != input_h_) {
-    input_w_ = w;
-    input_h_ = h;
-    seed_w_ = static_cast<int>(float(w) / delta_min_);
-    seed_h_ = static_cast<int>(float(h) / delta_min_);
+    if (w > alloc_w_ || h > alloc_h_) {
+      alloc_w_ = std::max(w, alloc_w_);
+      alloc_h_ = std::max(h, alloc_h_);
+      const int seed_alloc_w = static_cast<int>(float(alloc_w_) / delta_min_);
+      const int seed_alloc_h = static_cast<int>(float(alloc_h_) / delta_min_);
 
-    luminosityTexture_ = MakeTexture2D(device_, w, h,
-                                        MTLPixelFormatR8Unorm,
-                                        MTLStorageModeShared);
-    scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
+      luminosityTexture_ = MakeTexture2D(device_, alloc_w_, alloc_h_,
+                                          MTLPixelFormatR8Unorm,
+                                          MTLStorageModeShared);
+      scaledTexture_ = MakeTexture2D(device_, seed_alloc_w, seed_alloc_h,
+                                      MTLPixelFormatR16Float,
+                                      MTLStorageModePrivate);
+      seedTexture_ = MakeTexture2D(device_, seed_alloc_w, seed_alloc_h,
                                     MTLPixelFormatR16Float,
                                     MTLStorageModePrivate);
-    seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                  MTLPixelFormatR16Float,
-                                  MTLStorageModePrivate);
-    seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                          MTLPixelFormatR16Float,
-                                          MTLStorageModePrivate);
-    if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
-        !seedConvWorkTexture_) {
-      return false;
+      seedConvWorkTexture_ = MakeTexture2D(device_, seed_alloc_w,
+                                            seed_alloc_h,
+                                            MTLPixelFormatR16Float,
+                                            MTLStorageModePrivate);
+      if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
+          !seedConvWorkTexture_) {
+        return false;
+      }
+
+      SetupOctaves(alloc_w_, alloc_h_);
+      if (!OctavesResourcesReady(octaves_)) {
+        return false;
+      }
     }
 
-    SetupOctaves(w, h);
-    if (!OctavesResourcesReady(octaves_)) {
-      return false;
-    }
+    ConfigureForSize(w, h);
   }
 
-  if (octaves_.empty()) {
+  if (num_active_octaves_ == 0) {
     return true;
   }
 
@@ -1158,8 +1269,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
   // encoded into two encoders around the seed blit; the serial dispatch type
   // orders dependent dispatches within each encoder.
   {
-    if ((int)seedTexture_.width != octaves_[0].width ||
-        (int)seedTexture_.height != octaves_[0].height) {
+    if (seed_w_ != octaves_[0].width || seed_h_ != octaves_[0].height) {
       return false;
     }
 
@@ -1197,7 +1307,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     }
     EncodeOctave(enc, octaves_[0], nil);
     // Subsequent octaves read from previous octave's Gaussian textures.
-    for (size_t i = 1; i < octaves_.size(); ++i) {
+    for (size_t i = 1; i < num_active_octaves_; ++i) {
       EncodeOctave(enc, octaves_[i], octaves_[i - 1].gaussianTextures);
     }
     [enc endEncoding];
@@ -1210,7 +1320,7 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
   // Phase 2: interpolate, orientate, and describe keypoints. Every stage
   // encodes the dispatches for all octaves into one command buffer and waits
   // once, instead of synchronizing per octave and stage.
-  const size_t num_octaves = octaves_.size();
+  const size_t num_octaves = num_active_octaves_;
   std::vector<int> extrema_counts(num_octaves, 0);
   std::vector<int> orientation_counts(num_octaves, 0);
   std::vector<int> descriptor_counts(num_octaves, 0);
@@ -1360,6 +1470,7 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(
   [enc setComputePipelineState:bilinearUpScalePipeline_];
   [enc setTexture:scaledTexture_ atIndex:0];
   [enc setTexture:luminosityTexture_ atIndex:1];
+  [enc setBuffer:bilinearParamsBuffer_ offset:0 atIndex:0];
   [enc dispatchThreadgroups:grid threadsPerThreadgroup:tg];
 
   // Gaussian blur scaled → seed (separable 1D convolution).

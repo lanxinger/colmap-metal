@@ -17,6 +17,9 @@ struct ConvolutionParameters {
     int32_t inputDepth;
     int32_t outputDepth;
     int32_t count;
+    // Logical image size; textures may be allocated larger than the image.
+    int32_t width;
+    int32_t height;
     float weights[CONVOLUTION_WEIGHTS_LENGTH];
 };
 

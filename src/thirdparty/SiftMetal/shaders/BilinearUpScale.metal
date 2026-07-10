@@ -6,22 +6,26 @@
 //
 
 #include <metal_stdlib>
+
+#include "../include/SeedStage.h"
+
 using namespace metal;
 
 
 kernel void bilinearUpScale(
     texture2d<float, access::write> outputTexture [[texture(0)]],
     texture2d<float, access::read> inputTexture [[texture(1)]],
+    constant BilinearUpScaleParameters & parameters [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    const int wo = outputTexture.get_width();
-    const int ho = outputTexture.get_height();
+    const int wo = parameters.outputWidth;
+    const int ho = parameters.outputHeight;
     if (gid.x >= uint(wo) || gid.y >= uint(ho)) {
         return;
     }
     
-    const int wi = inputTexture.get_width();
-    const int hi = inputTexture.get_height();
+    const int wi = parameters.inputWidth;
+    const int hi = parameters.inputHeight;
     
     const float dx = (float)wi / (float)wo;
     const float dy = (float)hi / (float)ho;

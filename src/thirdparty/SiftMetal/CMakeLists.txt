@@ -22,6 +22,7 @@ set(METAL_SHADER_HEADERS
     ${SIFT_METAL_SHADER_DIR}/Common.hpp
     ${SIFT_METAL_INCLUDE_DIR}/ConvolutionSeries.h
     ${SIFT_METAL_INCLUDE_DIR}/NearestNeighbor.h
+    ${SIFT_METAL_INCLUDE_DIR}/SeedStage.h
     ${SIFT_METAL_INCLUDE_DIR}/SIFTDescriptor.h
     ${SIFT_METAL_INCLUDE_DIR}/SIFTExtrema.h
     ${SIFT_METAL_INCLUDE_DIR}/SIFTInterpolate.h

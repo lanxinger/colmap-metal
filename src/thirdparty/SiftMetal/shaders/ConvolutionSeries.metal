@@ -19,8 +19,8 @@ kernel void convolutionSeriesX(
     constant ConvolutionParameters & parameters [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    const int width = inputTexture.get_width();
-    const int height = outputTexture.get_height();
+    const int width = parameters.width;
+    const int height = parameters.height;
     if (gid.x >= uint(width) || gid.y >= uint(height)) {
         return;
     }
@@ -53,8 +53,8 @@ kernel void convolutionSeriesY(
     constant ConvolutionParameters & parameters [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    const int width = outputTexture.get_width();
-    const int height = inputTexture.get_height();
+    const int width = parameters.width;
+    const int height = parameters.height;
     if (gid.x >= uint(width) || gid.y >= uint(height)) {
         return;
     }

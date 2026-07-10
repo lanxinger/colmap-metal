@@ -86,55 +86,132 @@ kernel void siftMatchBest(
     const device SIFTMatcherKeypoint* keypoints2 [[buffer(3)]],
     constant SIFTMatcherParameters& params [[buffer(4)]],
     device SIFTMatcherResult* results [[buffer(5)]],
-    uint gid [[thread_position_in_grid]]) {
-  // The host dispatches this serial kernel only for guided matching. Unguided
-  // dot-product matching uses siftMatchBestDotParallel.
-  if (gid >= params.numDescriptors1) {
+    uint gid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint threadsPerThreadgroup [[threads_per_threadgroup]]) {
+  // Guided L2 matching with the same blocked threadgroup structure as
+  // siftMatchBestDotParallel: each threadgroup matches a block of query
+  // descriptors, threads stride the candidates, and every candidate byte
+  // streamed from device memory is reused across the block.
+  const uint block = SIFT_MATCHER_DOT_BLOCK;
+  const uint vecPerDesc = SIFT_MATCHER_DESCRIPTOR_DIM / 4;
+  const uint rowBase = gid * block;
+  if (rowBase >= params.numDescriptors1) {
     return;
   }
+  const uint rowCount = min(block, params.numDescriptors1 - rowBase);
 
-  int bestIdx = -1;
-  float bestScore = FLT_MAX;
-  float secondBestScore = FLT_MAX;
+  threadgroup float bestScores[SIFT_MATCHER_DOT_THREADS];
+  threadgroup float secondBestScores[SIFT_MATCHER_DOT_THREADS];
+  threadgroup int bestIndices[SIFT_MATCHER_DOT_THREADS];
+  threadgroup int secondBestIndices[SIFT_MATCHER_DOT_THREADS];
+  threadgroup uchar4 descriptorBlock[SIFT_MATCHER_DOT_BLOCK]
+                                    [SIFT_MATCHER_DESCRIPTOR_DIM / 4];
 
-  // Cache this thread's descriptor once, as 4-byte vectors.
-  const device uchar4* desc1 = (const device uchar4*)(
-      descriptors1 + gid * SIFT_MATCHER_DESCRIPTOR_DIM);
-  uchar4 d1[SIFT_MATCHER_DESCRIPTOR_DIM / 4];
-  for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM / 4; ++k) {
-    d1[k] = desc1[k];
+  // Cooperative load of the query block; rows past the end are zeroed and
+  // their scores discarded below.
+  for (uint k = tid; k < block * vecPerDesc; k += threadsPerThreadgroup) {
+    const uint row = k / vecPerDesc;
+    const uint vec = k % vecPerDesc;
+    uchar4 value = uchar4(0);
+    if (row < rowCount) {
+      value = ((const device uchar4*)(
+          descriptors1 + (rowBase + row) * SIFT_MATCHER_DESCRIPTOR_DIM))[vec];
+    }
+    descriptorBlock[row][vec] = value;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  float localBestScore[SIFT_MATCHER_DOT_BLOCK];
+  float localSecondBestScore[SIFT_MATCHER_DOT_BLOCK];
+  int localBestIdx[SIFT_MATCHER_DOT_BLOCK];
+  int localSecondBestIdx[SIFT_MATCHER_DOT_BLOCK];
+  for (uint b = 0; b < block; ++b) {
+    localBestScore[b] = FLT_MAX;
+    localSecondBestScore[b] = FLT_MAX;
+    localBestIdx[b] = -1;
+    localSecondBestIdx[b] = -1;
   }
 
-  for (uint idx2 = 0; idx2 < params.numDescriptors2; ++idx2) {
-    if (RejectByGuidedGeometry(params, keypoints1, keypoints2, gid, idx2)) {
-      continue;
-    }
-
+  for (uint idx2 = tid; idx2 < params.numDescriptors2;
+       idx2 += threadsPerThreadgroup) {
     const device uchar4* desc2 = (const device uchar4*)(
         descriptors2 + idx2 * SIFT_MATCHER_DESCRIPTOR_DIM);
-    int4 acc = int4(0);
-    for (uint k = 0; k < SIFT_MATCHER_DESCRIPTOR_DIM / 4; ++k) {
-      const int4 diff = int4(d1[k]) - int4(desc2[k]);
-      acc += diff * diff;
-    }
-    const int score = acc.x + acc.y + acc.z + acc.w;
+    for (uint b = 0; b < rowCount; ++b) {
+      if (RejectByGuidedGeometry(
+              params, keypoints1, keypoints2, rowBase + b, idx2)) {
+        continue;
+      }
 
-    const float scoref = float(score);
-    if (scoref < bestScore) {
-      bestIdx = int(idx2);
-      secondBestScore = bestScore;
-      bestScore = scoref;
-    } else if (scoref < secondBestScore) {
-      secondBestScore = scoref;
+      int4 acc = int4(0);
+      for (uint k = 0; k < vecPerDesc; ++k) {
+        const int4 diff = int4(descriptorBlock[b][k]) - int4(desc2[k]);
+        acc += diff * diff;
+      }
+      const float scoref = float(acc.x + acc.y + acc.z + acc.w);
+
+      if (scoref < localBestScore[b]) {
+        localSecondBestIdx[b] = localBestIdx[b];
+        localSecondBestScore[b] = localBestScore[b];
+        localBestIdx[b] = int(idx2);
+        localBestScore[b] = scoref;
+      } else if (scoref < localSecondBestScore[b]) {
+        localSecondBestIdx[b] = int(idx2);
+        localSecondBestScore[b] = scoref;
+      }
     }
   }
 
-  const bool accepted = bestIdx >= 0 && bestScore <= params.maxL2Distance &&
-                        bestScore < params.maxRatioSquared * secondBestScore;
+  // Reduce and emit one row at a time, reusing the shared scratch arrays.
+  for (uint b = 0; b < rowCount; ++b) {
+    bestScores[tid] = localBestScore[b];
+    secondBestScores[tid] = localSecondBestScore[b];
+    bestIndices[tid] = localBestIdx[b];
+    secondBestIndices[tid] = localSecondBestIdx[b];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  results[gid].index = accepted ? bestIdx : -1;
-  results[gid].bestScore = bestScore;
-  results[gid].secondBestScore = secondBestScore;
+    if (tid == 0) {
+      int bestIdx = -1;
+      int secondBestIdx = -1;
+      float bestScore = FLT_MAX;
+      float secondBestScore = FLT_MAX;
+
+      for (uint i = 0; i < threadsPerThreadgroup; ++i) {
+        const float candidates[2] = {bestScores[i], secondBestScores[i]};
+        const int candidateIndices[2] = {bestIndices[i], secondBestIndices[i]};
+        for (uint candidate = 0; candidate < 2; ++candidate) {
+          const float score = candidates[candidate];
+          const int index = candidateIndices[candidate];
+          if (index < 0) {
+            continue;
+          }
+          if (score < bestScore ||
+              (score == bestScore && (bestIdx < 0 || index < bestIdx))) {
+            secondBestIdx = bestIdx;
+            secondBestScore = bestScore;
+            bestIdx = index;
+            bestScore = score;
+          } else if (index != bestIdx &&
+                     (score < secondBestScore ||
+                      (score == secondBestScore &&
+                       (secondBestIdx < 0 || index < secondBestIdx)))) {
+            secondBestIdx = index;
+            secondBestScore = score;
+          }
+        }
+      }
+
+      const bool accepted = bestIdx >= 0 &&
+                            bestScore <= params.maxL2Distance &&
+                            bestScore <
+                                params.maxRatioSquared * secondBestScore;
+
+      results[rowBase + b].index = accepted ? bestIdx : -1;
+      results[rowBase + b].bestScore = bestScore;
+      results[rowBase + b].secondBestScore = secondBestScore;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
 }
 
 kernel void siftMatchBestDotParallel(

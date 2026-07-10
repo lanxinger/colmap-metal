@@ -619,21 +619,16 @@ bool SiftMetalMatcherImpl::EncodeOneWay(
   [encoder setBuffer:keypoints2Buffer offset:0 atIndex:3];
   [encoder setBuffer:dir.paramsBuffer offset:0 atIndex:4];
   [encoder setBuffer:dir.resultsBuffer offset:0 atIndex:5];
-  if (use_parallel_dot_pipeline) {
-    const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
-        pipeline.maxTotalThreadsPerThreadgroup, SIFT_MATCHER_DOT_THREADS);
-    const NSUInteger numBlocks =
-        (static_cast<NSUInteger>(num_descriptors1) + SIFT_MATCHER_DOT_BLOCK -
-         1) /
-        SIFT_MATCHER_DOT_BLOCK;
-    [encoder dispatchThreadgroups:MTLSizeMake(numBlocks, 1, 1)
-             threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
-  } else {
-    const NSUInteger threadsPerThreadgroup =
-        std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup, 256);
-    [encoder dispatchThreads:MTLSizeMake(num_descriptors1, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
-  }
+  // Both kernels use the blocked threadgroup structure: one group per
+  // SIFT_MATCHER_DOT_BLOCK query descriptors.
+  const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
+      pipeline.maxTotalThreadsPerThreadgroup, SIFT_MATCHER_DOT_THREADS);
+  const NSUInteger numBlocks =
+      (static_cast<NSUInteger>(num_descriptors1) + SIFT_MATCHER_DOT_BLOCK -
+       1) /
+      SIFT_MATCHER_DOT_BLOCK;
+  [encoder dispatchThreadgroups:MTLSizeMake(numBlocks, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(threadsPerThreadgroup, 1, 1)];
   return true;
 }
 

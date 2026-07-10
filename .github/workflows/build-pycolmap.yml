@@ -4,14 +4,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Automatic push/pull_request triggers are disabled on this fork: the wheel
+# build fails in install-colmap-macos.sh with a broken Homebrew GLEW package
+# (GLEW_INCLUDE_DIRS-NOTFOUND) before compiling any project code. Run
+# manually via workflow_dispatch or on releases until that is fixed.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - release/*
-  pull_request:
-    types: [ assigned, opened, synchronize, reopened ]
   release:
     types: [ published, edited ]
 

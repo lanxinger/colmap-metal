@@ -129,7 +129,7 @@ TwoViewGeometry CreatePlanarTwoViewGeometry() {
   return tvg;
 }
 
-void RunGpuTest(std::function<void()> test_body) {
+void RunGpuTest(const std::function<void()>& test_body) {
 #if defined(COLMAP_METAL_ENABLED) || defined(COLMAP_CUDA_ENABLED)
   test_body();
 #elif defined(COLMAP_GPU_ENABLED) && defined(COLMAP_GUI_ENABLED)

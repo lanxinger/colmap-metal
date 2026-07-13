@@ -34,6 +34,9 @@
 
 #include "colmap/math/random.h"
 
+#include <utility>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -154,21 +157,27 @@ TEST(WarpMetal, MatchesCpuForDistortedCamera) {
   source_camera.params[5] = 0.015;
   source_camera.params[6] = 0.001;
   source_camera.params[7] = -0.001;
-  const Camera target_camera =
+  const Camera base_target_camera =
       Camera::CreateFromModelId(2, CameraModelId::kPinhole, 112, 128, 96);
 
   for (const bool as_rgb : {false, true}) {
     const Bitmap source_image = GenerateRandomBitmap(160, 120, as_rgb);
-    Bitmap cpu_image;
-    WarpImageBetweenCameras(
-        source_camera, target_camera, source_image, &cpu_image);
+    for (const auto& [target_width, target_height] :
+         std::vector<std::pair<size_t, size_t>>{{128, 96}, {64, 48}}) {
+      Camera target_camera = base_target_camera;
+      target_camera.Rescale(target_width, target_height);
 
-    Bitmap metal_image;
-    if (!internal::WarpImageBetweenCamerasMetal(
-            source_camera, target_camera, source_image, &metal_image)) {
-      GTEST_SKIP() << "Metal image warping is unavailable";
+      Bitmap cpu_image;
+      WarpImageBetweenCameras(
+          source_camera, target_camera, source_image, &cpu_image);
+
+      Bitmap metal_image;
+      if (!internal::WarpImageBetweenCamerasMetal(
+              source_camera, target_camera, source_image, &metal_image)) {
+        GTEST_SKIP() << "Metal image warping is unavailable";
+      }
+      CheckBitmapsNear(cpu_image, metal_image, 2);
     }
-    CheckBitmapsNear(cpu_image, metal_image, 1);
   }
 }
 #endif

@@ -10,11 +10,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #import <Foundation/Foundation.h>
@@ -31,6 +33,12 @@ namespace {
 constexpr size_t kMaxRemapCacheEntries = 2;
 constexpr size_t kMaxRemapCacheBytes = 160 * 1024 * 1024;
 
+bool MetalLanczosDisabled() {
+  // Diagnostic escape hatch for quality comparisons and driver workarounds.
+  const char* value = std::getenv("COLMAP_DISABLE_METAL_LANCZOS");
+  return value != nullptr && std::string_view(value) != "0";
+}
+
 struct SourceCoordinate {
   float x;
   float y;
@@ -41,6 +49,15 @@ static_assert(sizeof(SourceCoordinate) == 2 * sizeof(float));
 struct WarpImageParameters {
   uint32_t width;
   uint32_t height;
+  uint32_t channels;
+  uint32_t pixel_count;
+};
+
+struct ResizeImageParameters {
+  uint32_t source_width;
+  uint32_t source_height;
+  uint32_t target_width;
+  uint32_t target_height;
   uint32_t channels;
   uint32_t pixel_count;
 };
@@ -123,10 +140,17 @@ class MetalImageWarper {
       return false;
     }
 
-    Bitmap full_resolution_target(static_cast<int>(source_camera.width),
-                                  static_cast<int>(source_camera.height),
-                                  source_image.IsRGB());
-    const size_t num_bytes = source_image.NumBytes();
+    const bool resize_with_metal = !MetalLanczosDisabled() &&
+                                   target_camera.width <= source_camera.width &&
+                                   target_camera.height <= source_camera.height &&
+                                   (target_camera.width != source_camera.width ||
+                                    target_camera.height != source_camera.height);
+    Bitmap result(resize_with_metal ? static_cast<int>(target_camera.width)
+                                    : static_cast<int>(source_camera.width),
+                  resize_with_metal ? static_cast<int>(target_camera.height)
+                                    : static_cast<int>(source_camera.height),
+                  source_image.IsRGB());
+    const size_t source_num_bytes = source_image.NumBytes();
 
     Timer gpu_timer;
     {
@@ -134,11 +158,18 @@ class MetalImageWarper {
       // controller calls this method concurrently from its image thread pool.
       std::lock_guard<std::mutex> lock(execution_mutex_);
       gpu_timer.Start();
-      if (!EnsureStagingBuffers(num_bytes)) {
+      if (!EnsureStagingBuffers(source_num_bytes)) {
         return false;
       }
 
-      std::memcpy(input_buffer_.contents, source_image.RowMajorData().data(), num_bytes);
+      if (resize_with_metal && !EnsureResizeBuffers(target_camera.width,
+                                                    source_camera.height,
+                                                    target_camera.height,
+                                                    source_image.Channels())) {
+        return false;
+      }
+
+      std::memcpy(input_buffer_.contents, source_image.RowMajorData().data(), source_num_bytes);
 
       id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
       id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
@@ -168,6 +199,54 @@ class MetalImageWarper {
       [encoder dispatchThreads:MTLSizeMake(pixel_count, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(thread_width, 1, 1)];
       [encoder endEncoding];
+
+      if (resize_with_metal) {
+        const size_t horizontal_pixel_count = target_camera.width * source_camera.height;
+        const size_t target_pixel_count = target_camera.width * target_camera.height;
+        if (horizontal_pixel_count > std::numeric_limits<uint32_t>::max() ||
+            target_pixel_count > std::numeric_limits<uint32_t>::max()) {
+          return false;
+        }
+
+        const ResizeImageParameters horizontal_params = {
+            static_cast<uint32_t>(source_camera.width),
+            static_cast<uint32_t>(source_camera.height),
+            static_cast<uint32_t>(target_camera.width),
+            static_cast<uint32_t>(target_camera.height),
+            static_cast<uint32_t>(source_image.Channels()),
+            static_cast<uint32_t>(horizontal_pixel_count),
+        };
+        encoder = [command_buffer computeCommandEncoder];
+        if (!encoder) {
+          return false;
+        }
+        [encoder setComputePipelineState:resize_horizontal_pipeline_];
+        [encoder setBuffer:output_buffer_ offset:0 atIndex:0];
+        [encoder setBuffer:resize_intermediate_buffer_ offset:0 atIndex:1];
+        [encoder setBytes:&horizontal_params length:sizeof(horizontal_params) atIndex:2];
+        const NSUInteger horizontal_thread_width =
+            std::min<NSUInteger>(resize_horizontal_pipeline_.maxTotalThreadsPerThreadgroup, 256);
+        [encoder dispatchThreads:MTLSizeMake(horizontal_pixel_count, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(horizontal_thread_width, 1, 1)];
+        [encoder endEncoding];
+
+        ResizeImageParameters vertical_params = horizontal_params;
+        vertical_params.pixel_count = static_cast<uint32_t>(target_pixel_count);
+        encoder = [command_buffer computeCommandEncoder];
+        if (!encoder) {
+          return false;
+        }
+        [encoder setComputePipelineState:resize_vertical_pipeline_];
+        [encoder setBuffer:resize_intermediate_buffer_ offset:0 atIndex:0];
+        [encoder setBuffer:resize_output_buffer_ offset:0 atIndex:1];
+        [encoder setBytes:&vertical_params length:sizeof(vertical_params) atIndex:2];
+        const NSUInteger vertical_thread_width =
+            std::min<NSUInteger>(resize_vertical_pipeline_.maxTotalThreadsPerThreadgroup, 256);
+        [encoder dispatchThreads:MTLSizeMake(target_pixel_count, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(vertical_thread_width, 1, 1)];
+        [encoder endEncoding];
+      }
+
       [command_buffer commit];
       [command_buffer waitUntilCompleted];
       if (command_buffer.status != MTLCommandBufferStatusCompleted) {
@@ -176,18 +255,20 @@ class MetalImageWarper {
         return false;
       }
 
-      std::memcpy(full_resolution_target.RowMajorData().data(), output_buffer_.contents, num_bytes);
+      const id<MTLBuffer> result_buffer =
+          resize_with_metal ? resize_output_buffer_ : output_buffer_;
+      std::memcpy(result.RowMajorData().data(), result_buffer.contents, result.NumBytes());
     }
 
     VLOG(1) << "METAL_WARP width=" << source_camera.width << " height=" << source_camera.height
-            << " channels=" << source_image.Channels()
+            << " channels=" << source_image.Channels() << " resize_on_gpu=" << resize_with_metal
             << " dispatch_and_copy_s=" << gpu_timer.ElapsedSeconds();
 
-    if (target_camera.width != source_camera.width ||
-        target_camera.height != source_camera.height) {
-      full_resolution_target.Rescale(target_camera.width, target_camera.height);
+    if (!resize_with_metal && (target_camera.width != source_camera.width ||
+                               target_camera.height != source_camera.height)) {
+      result.Rescale(target_camera.width, target_camera.height);
     }
-    *target_image = std::move(full_resolution_target);
+    *target_image = std::move(result);
     return true;
   }
 
@@ -231,6 +312,32 @@ class MetalImageWarper {
       pipeline_ = [device_ newComputePipelineStateWithFunction:function error:&error];
       if (!pipeline_) {
         LOG(ERROR) << "Failed to create Metal image warp pipeline: "
+                   << error.localizedDescription.UTF8String;
+        return;
+      }
+
+      function = [library_ newFunctionWithName:@"resizeLanczosHorizontal"];
+      if (!function) {
+        LOG(ERROR) << "Metal horizontal Lanczos function is missing";
+        return;
+      }
+      resize_horizontal_pipeline_ = [device_ newComputePipelineStateWithFunction:function
+                                                                           error:&error];
+      if (!resize_horizontal_pipeline_) {
+        LOG(ERROR) << "Failed to create Metal horizontal Lanczos pipeline: "
+                   << error.localizedDescription.UTF8String;
+        return;
+      }
+
+      function = [library_ newFunctionWithName:@"resizeLanczosVertical"];
+      if (!function) {
+        LOG(ERROR) << "Metal vertical Lanczos function is missing";
+        return;
+      }
+      resize_vertical_pipeline_ = [device_ newComputePipelineStateWithFunction:function
+                                                                         error:&error];
+      if (!resize_vertical_pipeline_) {
+        LOG(ERROR) << "Failed to create Metal vertical Lanczos pipeline: "
                    << error.localizedDescription.UTF8String;
         return;
       }
@@ -322,12 +429,43 @@ class MetalImageWarper {
     return true;
   }
 
+  bool EnsureResizeBuffers(const size_t target_width,
+                           const size_t source_height,
+                           const size_t target_height,
+                           const size_t channels) {
+    // FP16 storage caused visible error amplification after JPEG encoding.
+    const size_t intermediate_num_bytes = target_width * source_height * channels * sizeof(float);
+    if (resize_intermediate_capacity_ < intermediate_num_bytes) {
+      resize_intermediate_buffer_ = [device_ newBufferWithLength:intermediate_num_bytes
+                                                         options:MTLResourceStorageModePrivate];
+      if (!resize_intermediate_buffer_) {
+        resize_intermediate_capacity_ = 0;
+        return false;
+      }
+      resize_intermediate_capacity_ = intermediate_num_bytes;
+    }
+
+    const size_t output_num_bytes = target_width * target_height * channels;
+    if (resize_output_capacity_ < output_num_bytes) {
+      resize_output_buffer_ = [device_ newBufferWithLength:output_num_bytes
+                                                   options:MTLResourceStorageModeShared];
+      if (!resize_output_buffer_) {
+        resize_output_capacity_ = 0;
+        return false;
+      }
+      resize_output_capacity_ = output_num_bytes;
+    }
+    return true;
+  }
+
   std::once_flag initialize_once_;
   bool initialized_ = false;
   id<MTLDevice> device_ = nil;
   id<MTLCommandQueue> command_queue_ = nil;
   id<MTLLibrary> library_ = nil;
   id<MTLComputePipelineState> pipeline_ = nil;
+  id<MTLComputePipelineState> resize_horizontal_pipeline_ = nil;
+  id<MTLComputePipelineState> resize_vertical_pipeline_ = nil;
 
   std::mutex remap_cache_mutex_;
   std::vector<std::shared_ptr<CachedRemap>> remap_cache_;
@@ -338,6 +476,10 @@ class MetalImageWarper {
   id<MTLBuffer> input_buffer_ = nil;
   id<MTLBuffer> output_buffer_ = nil;
   size_t staging_capacity_ = 0;
+  id<MTLBuffer> resize_intermediate_buffer_ = nil;
+  size_t resize_intermediate_capacity_ = 0;
+  id<MTLBuffer> resize_output_buffer_ = nil;
+  size_t resize_output_capacity_ = 0;
 };
 
 MetalImageWarper& ImageWarper() {

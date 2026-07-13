@@ -163,6 +163,20 @@ void BindIncrementalPipeline(py::module& m) {
       .def_readwrite("ba_gpu_index",
                      &IncrementalPipelineOptions::ba_gpu_index,
                      "Index of CUDA GPU to use for BA, if available.")
+      .def_readwrite("ba_auto_select_solver_type",
+                     &Opts::ba_auto_select_solver_type)
+      .def_readwrite("ba_linear_solver_type", &Opts::ba_linear_solver_type)
+      .def_readwrite("ba_preconditioner_type", &Opts::ba_preconditioner_type)
+      .def_readwrite("ba_dense_linear_algebra_library_type",
+                     &Opts::ba_dense_linear_algebra_library_type)
+      .def_readwrite("ba_sparse_linear_algebra_library_type",
+                     &Opts::ba_sparse_linear_algebra_library_type)
+      .def_readwrite("ba_use_explicit_schur_complement",
+                     &Opts::ba_use_explicit_schur_complement)
+      .def_readwrite("ba_use_mixed_precision_solves",
+                     &Opts::ba_use_mixed_precision_solves)
+      .def_readwrite("ba_max_num_refinement_iterations",
+                     &Opts::ba_max_num_refinement_iterations)
       .def_readwrite("ba_local_backend",
                      &Opts::ba_local_backend,
                      "Bundle adjustment solver backend for local bundle "

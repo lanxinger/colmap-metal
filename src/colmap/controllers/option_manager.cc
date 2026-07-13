@@ -59,6 +59,63 @@
 namespace config = boost::program_options;
 
 namespace colmap {
+namespace {
+
+std::string_view CeresLinearSolverTypeToString(
+    const ceres::LinearSolverType type) {
+  return ceres::LinearSolverTypeToString(type);
+}
+
+ceres::LinearSolverType CeresLinearSolverTypeFromString(
+    const std::string_view value) {
+  ceres::LinearSolverType type;
+  THROW_CHECK(ceres::StringToLinearSolverType(std::string(value), &type))
+      << "Invalid Ceres linear solver type: " << value;
+  return type;
+}
+
+std::string_view CeresPreconditionerTypeToString(
+    const ceres::PreconditionerType type) {
+  return ceres::PreconditionerTypeToString(type);
+}
+
+ceres::PreconditionerType CeresPreconditionerTypeFromString(
+    const std::string_view value) {
+  ceres::PreconditionerType type;
+  THROW_CHECK(ceres::StringToPreconditionerType(std::string(value), &type))
+      << "Invalid Ceres preconditioner type: " << value;
+  return type;
+}
+
+std::string_view CeresDenseLinearAlgebraLibraryTypeToString(
+    const ceres::DenseLinearAlgebraLibraryType type) {
+  return ceres::DenseLinearAlgebraLibraryTypeToString(type);
+}
+
+ceres::DenseLinearAlgebraLibraryType
+CeresDenseLinearAlgebraLibraryTypeFromString(const std::string_view value) {
+  ceres::DenseLinearAlgebraLibraryType type;
+  THROW_CHECK(
+      ceres::StringToDenseLinearAlgebraLibraryType(std::string(value), &type))
+      << "Invalid Ceres dense linear algebra library: " << value;
+  return type;
+}
+
+std::string_view CeresSparseLinearAlgebraLibraryTypeToString(
+    const ceres::SparseLinearAlgebraLibraryType type) {
+  return ceres::SparseLinearAlgebraLibraryTypeToString(type);
+}
+
+ceres::SparseLinearAlgebraLibraryType
+CeresSparseLinearAlgebraLibraryTypeFromString(const std::string_view value) {
+  ceres::SparseLinearAlgebraLibraryType type;
+  THROW_CHECK(
+      ceres::StringToSparseLinearAlgebraLibraryType(std::string(value), &type))
+      << "Invalid Ceres sparse linear algebra library: " << value;
+  return type;
+}
+
+}  // namespace
 
 OptionManager::OptionManager(bool add_project_options)
     : BaseOptionManager(add_project_options) {
@@ -557,6 +614,39 @@ void OptionManager::AddBundleAdjustmentOptions() {
   AddDefaultOption(
       "BundleAdjustmentCeres.max_num_images_direct_sparse_gpu_solver",
       &bundle_adjustment->ceres->max_num_images_direct_sparse_gpu_solver);
+  AddDefaultOption("BundleAdjustmentCeres.auto_select_solver_type",
+                   &bundle_adjustment->ceres->auto_select_solver_type);
+  AddDefaultEnumOption(
+      "BundleAdjustmentCeres.linear_solver_type",
+      &bundle_adjustment->ceres->solver_options.linear_solver_type,
+      CeresLinearSolverTypeToString,
+      CeresLinearSolverTypeFromString);
+  AddDefaultEnumOption(
+      "BundleAdjustmentCeres.preconditioner_type",
+      &bundle_adjustment->ceres->solver_options.preconditioner_type,
+      CeresPreconditionerTypeToString,
+      CeresPreconditionerTypeFromString);
+  AddDefaultEnumOption(
+      "BundleAdjustmentCeres.dense_linear_algebra_library_type",
+      &bundle_adjustment->ceres->solver_options
+           .dense_linear_algebra_library_type,
+      CeresDenseLinearAlgebraLibraryTypeToString,
+      CeresDenseLinearAlgebraLibraryTypeFromString);
+  AddDefaultEnumOption(
+      "BundleAdjustmentCeres.sparse_linear_algebra_library_type",
+      &bundle_adjustment->ceres->solver_options
+           .sparse_linear_algebra_library_type,
+      CeresSparseLinearAlgebraLibraryTypeToString,
+      CeresSparseLinearAlgebraLibraryTypeFromString);
+  AddDefaultOption(
+      "BundleAdjustmentCeres.use_explicit_schur_complement",
+      &bundle_adjustment->ceres->solver_options.use_explicit_schur_complement);
+  AddDefaultOption(
+      "BundleAdjustmentCeres.use_mixed_precision_solves",
+      &bundle_adjustment->ceres->solver_options.use_mixed_precision_solves);
+  AddDefaultOption(
+      "BundleAdjustmentCeres.max_num_refinement_iterations",
+      &bundle_adjustment->ceres->solver_options.max_num_refinement_iterations);
 
 #ifdef CASPAR_ENABLED
   // Caspar-specific options
@@ -650,6 +740,22 @@ void OptionManager::AddMapperOptions() {
                    &mapper->ba_local_max_refinement_change);
   AddDefaultOption("Mapper.ba_use_gpu", &mapper->ba_use_gpu);
   AddDefaultOption("Mapper.ba_gpu_index", &mapper->ba_gpu_index);
+  AddDefaultOption("Mapper.ba_auto_select_solver_type",
+                   &mapper->ba_auto_select_solver_type);
+  AddDefaultOption("Mapper.ba_linear_solver_type",
+                   &mapper->ba_linear_solver_type);
+  AddDefaultOption("Mapper.ba_preconditioner_type",
+                   &mapper->ba_preconditioner_type);
+  AddDefaultOption("Mapper.ba_dense_linear_algebra_library_type",
+                   &mapper->ba_dense_linear_algebra_library_type);
+  AddDefaultOption("Mapper.ba_sparse_linear_algebra_library_type",
+                   &mapper->ba_sparse_linear_algebra_library_type);
+  AddDefaultOption("Mapper.ba_use_explicit_schur_complement",
+                   &mapper->ba_use_explicit_schur_complement);
+  AddDefaultOption("Mapper.ba_use_mixed_precision_solves",
+                   &mapper->ba_use_mixed_precision_solves);
+  AddDefaultOption("Mapper.ba_max_num_refinement_iterations",
+                   &mapper->ba_max_num_refinement_iterations);
   AddDefaultEnumOption("Mapper.ba_local_backend",
                        &mapper->ba_local_backend,
                        BundleAdjustmentBackendToString,

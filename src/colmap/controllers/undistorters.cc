@@ -257,23 +257,35 @@ bool COLMAPUndistorter::Undistort(const image_t image_id) const {
   }
 
   Bitmap distorted_bitmap;
+  Timer stage_timer;
+  stage_timer.Start();
   if (!distorted_bitmap.Read(input_image_path)) {
     LOG(ERROR) << "Cannot read image at path: " << input_image_path;
     return false;
   }
+  const double read_time_in_seconds = stage_timer.ElapsedSeconds();
 
   Bitmap undistorted_bitmap;
   Camera undistorted_camera;
+  stage_timer.Restart();
   UndistortImage(camera_options_,
                  distorted_bitmap,
                  camera,
                  &undistorted_bitmap,
                  &undistorted_camera);
+  const double warp_time_in_seconds = stage_timer.ElapsedSeconds();
 
   MaybeSetJpegQuality(
       output_image_path, undistorted_bitmap, options_.jpeg_quality);
 
-  return undistorted_bitmap.Write(output_image_path);
+  stage_timer.Restart();
+  const bool write_success = undistorted_bitmap.Write(output_image_path);
+  const double write_time_in_seconds = stage_timer.ElapsedSeconds();
+  VLOG(1) << "UNDISTORT_TIMING image=" << image.Name()
+          << " read_s=" << read_time_in_seconds
+          << " warp_s=" << warp_time_in_seconds
+          << " write_s=" << write_time_in_seconds;
+  return write_success;
 }
 
 void COLMAPUndistorter::WritePatchMatchConfig(

@@ -140,6 +140,17 @@ struct IncrementalPipelineOptions {
   // GPU device index for bundle adjustment (-1 = auto-select).
   std::string ba_gpu_index = "-1";
 
+  // Optional Ceres solver overrides. "DEFAULT" preserves Ceres' configured
+  // default, which varies with the available linear algebra libraries.
+  bool ba_auto_select_solver_type = true;
+  std::string ba_linear_solver_type = "DEFAULT";
+  std::string ba_preconditioner_type = "DEFAULT";
+  std::string ba_dense_linear_algebra_library_type = "DEFAULT";
+  std::string ba_sparse_linear_algebra_library_type = "DEFAULT";
+  bool ba_use_explicit_schur_complement = false;
+  bool ba_use_mixed_precision_solves = false;
+  int ba_max_num_refinement_iterations = 0;
+
   // Bundle adjustment solver backend for local bundle adjustment.
   BundleAdjustmentBackend ba_local_backend = BundleAdjustmentBackend::CERES;
 

@@ -29,6 +29,7 @@
 
 #include "colmap/controllers/incremental_pipeline.h"
 
+#include "colmap/estimators/bundle_adjustment_ceres.h"
 #include "colmap/geometry/rigid3_matchers.h"
 #include "colmap/scene/database.h"
 #include "colmap/scene/reconstruction_matchers.h"
@@ -39,6 +40,40 @@
 
 namespace colmap {
 namespace {
+
+TEST(IncrementalPipelineOptions, PropagatesCeresSolverOverrides) {
+  IncrementalPipelineOptions options;
+  options.ba_auto_select_solver_type = false;
+  options.ba_linear_solver_type = "DENSE_SCHUR";
+  options.ba_preconditioner_type = "JACOBI";
+  options.ba_dense_linear_algebra_library_type = "LAPACK";
+  options.ba_sparse_linear_algebra_library_type = "EIGEN_SPARSE";
+  options.ba_use_mixed_precision_solves = true;
+  options.ba_max_num_refinement_iterations = 2;
+  ASSERT_TRUE(options.Check());
+
+  for (const BundleAdjustmentOptions& ba_options :
+       {options.LocalBundleAdjustment(), options.GlobalBundleAdjustment()}) {
+    ASSERT_NE(ba_options.ceres, nullptr);
+    EXPECT_FALSE(ba_options.ceres->auto_select_solver_type);
+    EXPECT_EQ(ba_options.ceres->solver_options.linear_solver_type,
+              ceres::DENSE_SCHUR);
+    EXPECT_EQ(ba_options.ceres->solver_options.preconditioner_type,
+              ceres::JACOBI);
+    EXPECT_EQ(
+        ba_options.ceres->solver_options.dense_linear_algebra_library_type,
+        ceres::LAPACK);
+    EXPECT_EQ(
+        ba_options.ceres->solver_options.sparse_linear_algebra_library_type,
+        ceres::EIGEN_SPARSE);
+    EXPECT_TRUE(ba_options.ceres->solver_options.use_mixed_precision_solves);
+    EXPECT_EQ(ba_options.ceres->solver_options.max_num_refinement_iterations,
+              2);
+  }
+
+  options.ba_linear_solver_type = "NOT_A_SOLVER";
+  EXPECT_FALSE(options.Check());
+}
 
 TEST(IncrementalPipeline, WithoutNoise) {
   const auto database_path = CreateTestDir() / "database.db";

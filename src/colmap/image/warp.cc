@@ -61,10 +61,6 @@ void WarpImageBetweenCameras(const Camera& source_camera,
   THROW_CHECK_EQ(source_camera.height, source_image.Height());
   THROW_CHECK_NOTNULL(target_image);
 
-  *target_image = Bitmap(static_cast<int>(source_camera.width),
-                         static_cast<int>(source_camera.height),
-                         source_image.IsRGB());
-
   // To avoid aliasing, perform the warping in the source resolution and
   // then rescale the image at the end.
   Camera scaled_target_camera = target_camera;
@@ -72,6 +68,21 @@ void WarpImageBetweenCameras(const Camera& source_camera,
       target_camera.height != source_camera.height) {
     scaled_target_camera.Rescale(source_camera.width, source_camera.height);
   }
+
+  // Resizing an already-undistorted image does not require camera projection
+  // or interpolation at the source resolution.
+  if (source_camera == scaled_target_camera) {
+    *target_image = source_image.Clone();
+    if (target_camera.width != source_camera.width ||
+        target_camera.height != source_camera.height) {
+      target_image->Rescale(target_camera.width, target_camera.height);
+    }
+    return;
+  }
+
+  *target_image = Bitmap(static_cast<int>(source_camera.width),
+                         static_cast<int>(source_camera.height),
+                         source_image.IsRGB());
 
   Eigen::Vector2d image_point;
   for (int y = 0; y < target_image->Height(); ++y) {

@@ -28,6 +28,9 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "colmap/image/warp.h"
+#if defined(COLMAP_METAL_ENABLED)
+#include "colmap/image/warp_metal.h"
+#endif
 
 #include "colmap/math/random.h"
 
@@ -87,6 +90,21 @@ void CheckBitmapsTransposed(const Bitmap& bitmap1, const Bitmap& bitmap2) {
   }
 }
 
+void CheckBitmapsNear(const Bitmap& bitmap1,
+                      const Bitmap& bitmap2,
+                      const int max_channel_difference) {
+  ASSERT_EQ(bitmap1.Width(), bitmap2.Width());
+  ASSERT_EQ(bitmap1.Height(), bitmap2.Height());
+  ASSERT_EQ(bitmap1.Channels(), bitmap2.Channels());
+  ASSERT_EQ(bitmap1.NumBytes(), bitmap2.NumBytes());
+  for (size_t i = 0; i < bitmap1.NumBytes(); ++i) {
+    EXPECT_LE(std::abs(static_cast<int>(bitmap1.RowMajorData()[i]) -
+                       static_cast<int>(bitmap2.RowMajorData()[i])),
+              max_channel_difference)
+        << "byte index " << i;
+  }
+}
+
 }  // namespace
 
 TEST(Warp, IdenticalCameras) {
@@ -127,6 +145,33 @@ TEST(Warp, ShiftedCameras) {
     }
   }
 }
+
+#if defined(COLMAP_METAL_ENABLED)
+TEST(WarpMetal, MatchesCpuForDistortedCamera) {
+  Camera source_camera =
+      Camera::CreateFromModelId(1, CameraModelId::kOpenCV, 140, 160, 120);
+  source_camera.params[4] = -0.08;
+  source_camera.params[5] = 0.015;
+  source_camera.params[6] = 0.001;
+  source_camera.params[7] = -0.001;
+  const Camera target_camera =
+      Camera::CreateFromModelId(2, CameraModelId::kPinhole, 112, 128, 96);
+
+  for (const bool as_rgb : {false, true}) {
+    const Bitmap source_image = GenerateRandomBitmap(160, 120, as_rgb);
+    Bitmap cpu_image;
+    WarpImageBetweenCameras(
+        source_camera, target_camera, source_image, &cpu_image);
+
+    Bitmap metal_image;
+    if (!internal::WarpImageBetweenCamerasMetal(
+            source_camera, target_camera, source_image, &metal_image)) {
+      GTEST_SKIP() << "Metal image warping is unavailable";
+    }
+    CheckBitmapsNear(cpu_image, metal_image, 1);
+  }
+}
+#endif
 
 TEST(Warp, WarpImageWithHomographyIdentity) {
   const Bitmap source_image_gray = GenerateRandomBitmap(100, 100, false);

@@ -121,6 +121,16 @@ inline const ceres::Solver::Summary& GetCeresSummary(
   return ceres_summary->ceres_summary;
 }
 
+#if defined(__APPLE__)
+TEST(CeresBundleAdjustmentOptions, UsesAccelerateLapackForDenseProblems) {
+  CeresBundleAdjustmentOptions options;
+  if (ceres::IsDenseLinearAlgebraLibraryTypeAvailable(ceres::LAPACK)) {
+    EXPECT_EQ(options.solver_options.dense_linear_algebra_library_type,
+              ceres::LAPACK);
+  }
+}
+#endif
+
 TEST(DefaultBundleAdjuster, Nominal) {
   SetPRNGSeed(0);
   Reconstruction gt_reconstruction;

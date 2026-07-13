@@ -30,6 +30,9 @@
 #include "colmap/image/undistortion.h"
 
 #include "colmap/image/warp.h"
+#if defined(COLMAP_METAL_ENABLED)
+#include "colmap/image/warp_metal.h"
+#endif
 #include "colmap/math/math.h"
 #include "colmap/sensor/models.h"
 
@@ -261,10 +264,28 @@ void UndistortImage(const UndistortCameraOptions& options,
 
   *undistorted_camera = UndistortCamera(options, distorted_camera);
 
-  WarpImageBetweenCameras(distorted_camera,
-                          *undistorted_camera,
-                          distorted_bitmap,
-                          undistorted_bitmap);
+  bool warped_with_metal = false;
+#if defined(COLMAP_METAL_ENABLED)
+  // Below this size the fixed GPU dispatch and synchronization overhead is
+  // larger than the measured CPU cost. Already-undistorted cameras use the
+  // clone/rescale fast path in WarpImageBetweenCameras.
+  constexpr size_t kMinPixelsForMetalWarp = 1024 * 1024;
+  if (!distorted_camera.IsUndistorted() &&
+      distorted_camera.width * distorted_camera.height >=
+          kMinPixelsForMetalWarp) {
+    warped_with_metal =
+        internal::WarpImageBetweenCamerasMetal(distorted_camera,
+                                               *undistorted_camera,
+                                               distorted_bitmap,
+                                               undistorted_bitmap);
+  }
+#endif
+  if (!warped_with_metal) {
+    WarpImageBetweenCameras(distorted_camera,
+                            *undistorted_camera,
+                            distorted_bitmap,
+                            undistorted_bitmap);
+  }
 
   distorted_bitmap.CloneMetadata(undistorted_bitmap);
 }

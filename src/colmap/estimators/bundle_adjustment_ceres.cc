@@ -37,6 +37,7 @@
 #include "colmap/util/cuda.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
+#include "colmap/util/timer.h"
 
 #include <iomanip>
 
@@ -108,6 +109,13 @@ CeresBundleAdjustmentOptions::CeresBundleAdjustmentOptions() {
   solver_options.max_num_consecutive_invalid_steps = 10;
   solver_options.max_consecutive_nonmonotonic_steps = 10;
   solver_options.num_threads = -1;
+#if defined(__APPLE__)
+  // Ceres' LAPACK backend uses Accelerate on Apple builds. It is faster than
+  // Eigen for the small dense-Schur problems that dominate incremental BA.
+  if (ceres::IsDenseLinearAlgebraLibraryTypeAvailable(ceres::LAPACK)) {
+    solver_options.dense_linear_algebra_library_type = ceres::LAPACK;
+  }
+#endif
 #if CERES_VERSION_MAJOR < 2
   solver_options.num_linear_solver_threads = -1;
 #endif  // CERES_VERSION_MAJOR
@@ -562,6 +570,28 @@ std::shared_ptr<CeresBundleAdjustmentSummary> CreateSummaryAndLogFailure(
   return summary;
 }
 
+void LogBundleAdjustmentTiming(const BundleAdjustmentConfig& config,
+                               const double setup_time_in_seconds,
+                               const ceres::Solver::Summary& summary) {
+  VLOG(1) << "BA_TIMING images=" << config.NumImages()
+          << " residuals=" << summary.num_residuals_reduced
+          << " parameters=" << summary.num_effective_parameters_reduced
+          << " setup_s=" << setup_time_in_seconds
+          << " solve_s=" << summary.total_time_in_seconds
+          << " preprocess_s=" << summary.preprocessor_time_in_seconds
+          << " linear_s=" << summary.linear_solver_time_in_seconds
+          << " jacobian_s=" << summary.jacobian_evaluation_time_in_seconds
+          << " solver="
+          << ceres::LinearSolverTypeToString(summary.linear_solver_type_used)
+          << " dense_library="
+          << ceres::DenseLinearAlgebraLibraryTypeToString(
+                 summary.dense_linear_algebra_library_type)
+          << " sparse_library="
+          << ceres::SparseLinearAlgebraLibraryTypeToString(
+                 summary.sparse_linear_algebra_library_type)
+          << " mixed_precision=" << summary.mixed_precision_solves_used;
+}
+
 ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
@@ -599,6 +629,9 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
                         Reconstruction& reconstruction)
       : CeresBundleAdjuster(options, config),
         loss_function_(options_.ceres->CreateLossFunction()) {
+    Timer setup_timer;
+    setup_timer.Start();
+
     ceres::Problem::Options problem_options;
     problem_options.loss_function_ownership = ceres::DO_NOT_TAKE_OWNERSHIP;
     problem_ = std::make_shared<ceres::Problem>(problem_options);
@@ -650,6 +683,8 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
       default:
         LOG(FATAL_THROW) << "Unknown BundleAdjustmentGauge";
     }
+
+    problem_setup_time_in_seconds_ = setup_timer.ElapsedSeconds();
   }
 
   std::shared_ptr<BundleAdjustmentSummary> Solve() override {
@@ -659,6 +694,8 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
 
     ceres::Solver::Summary ceres_summary =
         SolveWithGpuFallback(options_, config_, problem_.get());
+    LogBundleAdjustmentTiming(
+        config_, problem_setup_time_in_seconds_, ceres_summary);
 
     if (options_.print_summary || VLOG_IS_ON(1)) {
       PrintSolverSummary(ceres_summary, "Bundle adjustment report");
@@ -672,6 +709,10 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
 
   const std::set<image_t>& ParameterizedImageIds() const {
     return parameterized_image_ids_;
+  }
+
+  double ProblemSetupTimeSeconds() const {
+    return problem_setup_time_in_seconds_;
   }
 
   void AddImageToProblem(const image_t image_id,
@@ -884,6 +925,7 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
   std::set<camera_t> parameterized_camera_ids_;
   std::set<image_t> parameterized_image_ids_;
   std::unordered_map<point3D_t, size_t> point3D_num_observations_;
+  double problem_setup_time_in_seconds_ = 0.0;
 };
 
 class PosePriorBundleAdjuster : public CeresBundleAdjuster {
@@ -955,6 +997,10 @@ class PosePriorBundleAdjuster : public CeresBundleAdjuster {
 
     ceres::Solver::Summary ceres_summary =
         SolveWithGpuFallback(options_, config_, problem.get());
+    LogBundleAdjustmentTiming(
+        config_,
+        default_bundle_adjuster_->ProblemSetupTimeSeconds(),
+        ceres_summary);
 
     reconstruction_.Transform(Inverse(normalized_from_metric_));
 

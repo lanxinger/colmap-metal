@@ -36,8 +36,74 @@
 #include "colmap/util/file.h"
 #include "colmap/util/timer.h"
 
+#include <string_view>
+
 namespace colmap {
 namespace {
+
+constexpr std::string_view kDefaultCeresOption = "DEFAULT";
+
+bool IsValidCeresLinearSolverType(const std::string& value) {
+  ceres::LinearSolverType type;
+  return value == kDefaultCeresOption ||
+         ceres::StringToLinearSolverType(value, &type);
+}
+
+bool IsValidCeresPreconditionerType(const std::string& value) {
+  ceres::PreconditionerType type;
+  return value == kDefaultCeresOption ||
+         ceres::StringToPreconditionerType(value, &type);
+}
+
+bool IsValidCeresDenseLinearAlgebraLibraryType(const std::string& value) {
+  ceres::DenseLinearAlgebraLibraryType type;
+  return value == kDefaultCeresOption ||
+         ceres::StringToDenseLinearAlgebraLibraryType(value, &type);
+}
+
+bool IsValidCeresSparseLinearAlgebraLibraryType(const std::string& value) {
+  ceres::SparseLinearAlgebraLibraryType type;
+  return value == kDefaultCeresOption ||
+         ceres::StringToSparseLinearAlgebraLibraryType(value, &type);
+}
+
+void ConfigureCeresBundleAdjustmentOptions(
+    const IncrementalPipelineOptions& pipeline_options,
+    CeresBundleAdjustmentOptions* ceres_options) {
+  THROW_CHECK_NOTNULL(ceres_options);
+  ceres_options->auto_select_solver_type =
+      pipeline_options.ba_auto_select_solver_type;
+  auto& solver_options = ceres_options->solver_options;
+
+  if (pipeline_options.ba_linear_solver_type != kDefaultCeresOption) {
+    THROW_CHECK(
+        ceres::StringToLinearSolverType(pipeline_options.ba_linear_solver_type,
+                                        &solver_options.linear_solver_type));
+  }
+  if (pipeline_options.ba_preconditioner_type != kDefaultCeresOption) {
+    THROW_CHECK(ceres::StringToPreconditionerType(
+        pipeline_options.ba_preconditioner_type,
+        &solver_options.preconditioner_type));
+  }
+  if (pipeline_options.ba_dense_linear_algebra_library_type !=
+      kDefaultCeresOption) {
+    THROW_CHECK(ceres::StringToDenseLinearAlgebraLibraryType(
+        pipeline_options.ba_dense_linear_algebra_library_type,
+        &solver_options.dense_linear_algebra_library_type));
+  }
+  if (pipeline_options.ba_sparse_linear_algebra_library_type !=
+      kDefaultCeresOption) {
+    THROW_CHECK(ceres::StringToSparseLinearAlgebraLibraryType(
+        pipeline_options.ba_sparse_linear_algebra_library_type,
+        &solver_options.sparse_linear_algebra_library_type));
+  }
+  solver_options.use_explicit_schur_complement =
+      pipeline_options.ba_use_explicit_schur_complement;
+  solver_options.use_mixed_precision_solves =
+      pipeline_options.ba_use_mixed_precision_solves;
+  solver_options.max_num_refinement_iterations =
+      pipeline_options.ba_max_num_refinement_iterations;
+}
 
 void CustomizeIncrementalPipelineOptions(const DatabaseCache& database_cache,
                                          IncrementalPipelineOptions& options) {
@@ -166,6 +232,7 @@ BundleAdjustmentOptions IncrementalPipelineOptions::LocalBundleAdjustment()
   options.refine_extra_params = ba_refine_extra_params;
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
   if (options.ceres) {
+    ConfigureCeresBundleAdjustmentOptions(*this, options.ceres.get());
     options.ceres->solver_options.function_tolerance =
         ba_local_function_tolerance;
     options.ceres->solver_options.gradient_tolerance = 10.0;
@@ -202,6 +269,7 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
   options.refine_extra_params = ba_refine_extra_params;
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
   if (options.ceres) {
+    ConfigureCeresBundleAdjustmentOptions(*this, options.ceres.get());
     options.ceres->solver_options.function_tolerance =
         ba_global_function_tolerance;
     options.ceres->solver_options.gradient_tolerance = 1.0;
@@ -251,6 +319,13 @@ bool IncrementalPipelineOptions::Check() const {
   CHECK_OPTION_GE(ba_local_max_refinement_change, 0);
   CHECK_OPTION_GE(ba_global_max_refinements, 0);
   CHECK_OPTION_GE(ba_global_max_refinement_change, 0);
+  CHECK_OPTION(IsValidCeresLinearSolverType(ba_linear_solver_type));
+  CHECK_OPTION(IsValidCeresPreconditionerType(ba_preconditioner_type));
+  CHECK_OPTION(IsValidCeresDenseLinearAlgebraLibraryType(
+      ba_dense_linear_algebra_library_type));
+  CHECK_OPTION(IsValidCeresSparseLinearAlgebraLibraryType(
+      ba_sparse_linear_algebra_library_type));
+  CHECK_OPTION_GE(ba_max_num_refinement_iterations, 0);
   CHECK_OPTION_GE(snapshot_frames_freq, 0);
   CHECK_OPTION_GT(prior_position_loss_scale, 0.);
   CHECK_OPTION_GE(num_threads, -1);

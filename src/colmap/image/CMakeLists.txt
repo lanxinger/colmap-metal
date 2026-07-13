@@ -36,6 +36,7 @@ COLMAP_ADD_LIBRARY(
         line.h line.cc
         undistortion.h undistortion.cc
         warp.h warp.cc
+        warp_metal.h
     PUBLIC_LINK_LIBS
         colmap_scene
         colmap_util
@@ -44,6 +45,50 @@ COLMAP_ADD_LIBRARY(
         colmap_sensor
         colmap_vlfeat
 )
+if(METAL_ENABLED)
+    set(IMAGE_WARP_METAL_SHADER
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/WarpImage.metal")
+    set(IMAGE_WARP_METAL_AIR
+        "${CMAKE_CURRENT_BINARY_DIR}/WarpImage.air")
+    set(IMAGE_WARP_METALLIB
+        "${CMAKE_CURRENT_BINARY_DIR}/image_warp.metallib")
+
+    add_custom_command(
+        OUTPUT ${IMAGE_WARP_METAL_AIR}
+        COMMAND xcrun -sdk macosx metal
+            -c ${IMAGE_WARP_METAL_SHADER}
+            -o ${IMAGE_WARP_METAL_AIR}
+        DEPENDS ${IMAGE_WARP_METAL_SHADER}
+        COMMENT "Compiling Metal image warp shader"
+    )
+    add_custom_command(
+        OUTPUT ${IMAGE_WARP_METALLIB}
+        COMMAND xcrun -sdk macosx metallib
+            ${IMAGE_WARP_METAL_AIR}
+            -o ${IMAGE_WARP_METALLIB}
+        DEPENDS ${IMAGE_WARP_METAL_AIR}
+        COMMENT "Linking Metal image warp library"
+    )
+    add_custom_target(image_warp_metallib DEPENDS ${IMAGE_WARP_METALLIB})
+
+    target_sources(colmap_image PRIVATE warp_metal.mm)
+    add_dependencies(colmap_image image_warp_metallib)
+    set_source_files_properties(warp_metal.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc -std=c++17"
+    )
+    target_compile_definitions(colmap_image PRIVATE
+        IMAGE_WARP_METALLIB_PATH="${IMAGE_WARP_METALLIB}"
+    )
+    target_link_libraries(colmap_image PUBLIC
+        "-framework Metal"
+        "-framework Foundation"
+    )
+
+    install(FILES ${IMAGE_WARP_METALLIB}
+            DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES ${IMAGE_WARP_METALLIB}
+            DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
 if(LSD_ENABLED)
     target_link_libraries(colmap_image PRIVATE colmap_lsd)
 endif()

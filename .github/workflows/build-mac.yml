@@ -69,6 +69,7 @@ jobs:
             glog \
             googletest \
             ceres-solver \
+            glew \
             sqlite3 \
             ccache \
             libomp

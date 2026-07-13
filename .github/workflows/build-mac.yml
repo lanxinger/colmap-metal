@@ -16,17 +16,8 @@ on:
 
 jobs:
   build:
-    name: ${{ matrix.config.os }} ${{ matrix.config.arch }} ${{ matrix.config.cmakeBuildType }}
-    runs-on: ${{ matrix.config.os }}
-    strategy:
-      matrix:
-        config: [
-          {
-            os: macos-15,
-            arch: arm64,
-            cmakeBuildType: Release,
-          },
-        ]
+    name: macos-15 arm64 Release
+    runs-on: macos-15
 
     env:
       COMPILER_CACHE_VERSION: 1
@@ -41,20 +32,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check code format
+        run: |
+          python3 -m venv .ci-format
+          .ci-format/bin/pip install ruff==0.15.7 clang-format==22.1.1
+          PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/c++.sh --all
+          PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/python.sh --all
+          git diff --name-only
+          git diff --exit-code || (echo "Code formatting failed" && exit 1)
+
       - name: Restore compiler cache
         uses: actions/cache@v4
         id: cache-compiler
         with:
-          key: v${{ env.COMPILER_CACHE_VERSION }}-${{ matrix.config.os }}-${{ matrix.config.arch }}-${{ matrix.config.cmakeBuildType }}-${{ github.run_id }}-${{ github.run_number }}
-          restore-keys: v${{ env.COMPILER_CACHE_VERSION }}-${{ matrix.config.os }}-${{ matrix.config.arch }}-${{ matrix.config.cmakeBuildType }}
+          key: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release-${{ github.run_id }}-${{ github.run_number }}
+          restore-keys: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release
           path: ${{ env.COMPILER_CACHE_DIR }}
 
       - name: Restore FetchContent cache
         uses: actions/cache@v4
         id: cache-fetchcontent
         with:
-          key: fetchcontent-v${{ env.FETCHCONTENT_CACHE_VERSION }}-${{ matrix.config.os }}-${{ matrix.config.arch }}-${{ hashFiles('cmake/FindDependencies.cmake', 'src/thirdparty/CMakeLists.txt') }}
-          restore-keys: fetchcontent-v${{ env.FETCHCONTENT_CACHE_VERSION }}-${{ matrix.config.os }}-${{ matrix.config.arch }}-
+          key: fetchcontent-v${{ env.FETCHCONTENT_CACHE_VERSION }}-macos-15-arm64-${{ hashFiles('cmake/FindDependencies.cmake', 'src/thirdparty/CMakeLists.txt') }}
+          restore-keys: fetchcontent-v${{ env.FETCHCONTENT_CACHE_VERSION }}-macos-15-arm64-
           path: ${{ env.FETCHCONTENT_CACHE_DIR }}
 
       - name: Setup Mac
@@ -65,14 +65,10 @@ jobs:
             boost \
             eigen \
             openimageio \
-            curl \
             metis \
             glog \
             googletest \
             ceres-solver \
-            qt \
-            glew \
-            cgal \
             sqlite3 \
             ccache \
             libomp
@@ -80,24 +76,32 @@ jobs:
 
       - name: Configure and build
         run: |
-          export PATH="/usr/local/opt/qt/bin:$PATH"
           cmake --version
           mkdir -p build
           cd build
           cmake .. \
             -GNinja \
-            -DCMAKE_BUILD_TYPE=${{ matrix.config.cmakeBuildType }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCCACHE_ENABLED=ON \
+            -DCGAL_ENABLED=OFF \
+            -DCUDA_ENABLED=OFF \
+            -DDOWNLOAD_ENABLED=OFF \
+            -DFETCH_ONNX=OFF \
+            -DGUI_ENABLED=OFF \
+            -DMETAL_ENABLED=ON \
+            -DMVS_ENABLED=OFF \
+            -DONNX_ENABLED=OFF \
+            -DOPENGL_ENABLED=OFF \
             -DTESTS_ENABLED=ON \
             -DWERROR_ENABLED=ON \
-            -DQt6_DIR="$(brew --prefix qt)/lib/cmake/Qt6" \
             -DFETCHCONTENT_FULLY_DISCONNECTED=${{ steps.cache-fetchcontent.outputs.cache-hit == 'true' && 'ON' || 'OFF' }}
           ninja
 
       - name: Run tests
         run: |
           cd build
-          set +e
-          ctest --output-on-failure
+          ctest --output-on-failure --no-tests=error
 
       - name: Cleanup compiler cache
         run: |

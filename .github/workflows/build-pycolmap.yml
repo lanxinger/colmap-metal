@@ -6,12 +6,6 @@ concurrency:
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - release/*
-  pull_request:
-    types: [ assigned, opened, synchronize, reopened ]
   release:
     types: [ published, edited ]
 
@@ -22,9 +16,9 @@ jobs:
     strategy:
       matrix:
         config: [
-          {os: ubuntu-24.04, cudaEnabled: false},
-          {os: windows-2025, cudaEnabled: false},
-          {os: ubuntu-24.04, cudaEnabled: true},
+          {os: ubuntu-24.04, arch: x86_64, cudaEnabled: false},
+          {os: windows-2025, arch: AMD64, cudaEnabled: false},
+          {os: ubuntu-24.04, arch: x86_64, cudaEnabled: true},
         ]
     env:
       COMPILER_CACHE_VERSION: 1

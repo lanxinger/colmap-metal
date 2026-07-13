@@ -530,7 +530,7 @@ TEST(ThreadPool, NoArgReturn) {
   }
 
   for (auto& future : futures) {
-    future.get();
+    static_cast<void>(future.get());
   }
 }
 
@@ -550,7 +550,7 @@ TEST(ThreadPool, ArgReturn) {
   }
 
   for (auto& future : futures) {
-    future.get();
+    static_cast<void>(future.get());
   }
 }
 

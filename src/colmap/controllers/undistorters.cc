@@ -366,7 +366,7 @@ void PMVSUndistorter::Run() {
     LOG(INFO) << StringPrintf(
         "Undistorting image [%d/%d]", i + 1, futures.size());
 
-    futures[i].get();
+    static_cast<void>(futures[i].get());
   }
 
   LOG(INFO) << "Writing bundle file...";
@@ -601,7 +601,7 @@ void CMPMVSUndistorter::Run() {
     LOG(INFO) << StringPrintf(
         "Undistorting image [%d/%d]", i + 1, futures.size());
 
-    futures[i].get();
+    static_cast<void>(futures[i].get());
   }
 
   run_timer.PrintMinutes();
@@ -677,7 +677,7 @@ void StandaloneImageUndistorter::Run() {
     LOG(INFO) << StringPrintf(
         "Undistorting image [%d/%d]", i + 1, futures.size());
 
-    futures[i].get();
+    static_cast<void>(futures[i].get());
   }
 
   run_timer.PrintMinutes();

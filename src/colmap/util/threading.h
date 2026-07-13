@@ -381,7 +381,8 @@ auto ThreadPool::AddTask(func_t&& f, args_t&&... args)
     }
     tasks_.emplace([task = std::move(task), result]() {
       (*task)();
-      return [result = std::move(result)]() { result.get(); };
+      return
+          [result = std::move(result)]() { static_cast<void>(result.get()); };
     });
   }
 

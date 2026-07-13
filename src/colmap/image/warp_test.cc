@@ -93,6 +93,7 @@ void CheckBitmapsTransposed(const Bitmap& bitmap1, const Bitmap& bitmap2) {
   }
 }
 
+#if defined(COLMAP_METAL_ENABLED)
 void CheckBitmapsNear(const Bitmap& bitmap1,
                       const Bitmap& bitmap2,
                       const int max_channel_difference) {
@@ -107,6 +108,7 @@ void CheckBitmapsNear(const Bitmap& bitmap1,
         << "byte index " << i;
   }
 }
+#endif
 
 }  // namespace
 

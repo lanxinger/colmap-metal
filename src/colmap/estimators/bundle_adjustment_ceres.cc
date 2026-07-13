@@ -573,6 +573,13 @@ std::shared_ptr<CeresBundleAdjustmentSummary> CreateSummaryAndLogFailure(
 void LogBundleAdjustmentTiming(const BundleAdjustmentConfig& config,
                                const double setup_time_in_seconds,
                                const ceres::Solver::Summary& summary) {
+#if CERES_VERSION_MAJOR >= 3 || \
+    (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)
+  const bool mixed_precision_solves_used =
+      summary.mixed_precision_solves_used;
+#else
+  constexpr bool mixed_precision_solves_used = false;
+#endif
   VLOG(1) << "BA_TIMING images=" << config.NumImages()
           << " residuals=" << summary.num_residuals_reduced
           << " parameters=" << summary.num_effective_parameters_reduced
@@ -589,7 +596,7 @@ void LogBundleAdjustmentTiming(const BundleAdjustmentConfig& config,
           << " sparse_library="
           << ceres::SparseLinearAlgebraLibraryTypeToString(
                  summary.sparse_linear_algebra_library_type)
-          << " mixed_precision=" << summary.mixed_precision_solves_used;
+          << " mixed_precision=" << mixed_precision_solves_used;
 }
 
 ceres::Solver::Summary SolveWithGpuFallback(

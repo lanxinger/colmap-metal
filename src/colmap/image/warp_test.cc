@@ -180,6 +180,39 @@ TEST(WarpMetal, MatchesCpuForDistortedCamera) {
     }
   }
 }
+
+TEST(WarpMetal, MatchesCpuForSimpleRadialCamera) {
+  Camera source_camera =
+      Camera::CreateFromModelId(1, CameraModelId::kSimpleRadial, 140, 160, 120);
+  source_camera.params[1] = 78.25;
+  source_camera.params[2] = 60.75;
+  source_camera.params[3] = -0.08;
+  Camera base_target_camera =
+      Camera::CreateFromModelId(2, CameraModelId::kPinhole, 112, 128, 96);
+  base_target_camera.params[1] = 109;
+  base_target_camera.params[2] = 63.25;
+  base_target_camera.params[3] = 47.75;
+
+  for (const bool as_rgb : {false, true}) {
+    const Bitmap source_image = GenerateRandomBitmap(160, 120, as_rgb);
+    for (const auto& [target_width, target_height] :
+         std::vector<std::pair<size_t, size_t>>{{128, 96}, {64, 48}}) {
+      Camera target_camera = base_target_camera;
+      target_camera.Rescale(target_width, target_height);
+
+      Bitmap cpu_image;
+      WarpImageBetweenCameras(
+          source_camera, target_camera, source_image, &cpu_image);
+
+      Bitmap metal_image;
+      if (!internal::WarpImageBetweenCamerasMetal(
+              source_camera, target_camera, source_image, &metal_image)) {
+        GTEST_SKIP() << "Metal image warping is unavailable";
+      }
+      CheckBitmapsNear(cpu_image, metal_image, 2);
+    }
+  }
+}
 #endif
 
 TEST(Warp, WarpImageWithHomographyIdentity) {

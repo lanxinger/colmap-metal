@@ -53,6 +53,19 @@ struct WarpImageParameters {
   uint32_t pixel_count;
 };
 
+struct SimpleRadialToPinholeParameters {
+  float source_focal_length;
+  float source_principal_point_x;
+  float source_principal_point_y;
+  float source_radial;
+  float target_focal_length_x;
+  float target_focal_length_y;
+  float target_principal_point_x;
+  float target_principal_point_y;
+};
+
+static_assert(sizeof(SimpleRadialToPinholeParameters) == 8 * sizeof(float));
+
 struct ResizeImageParameters {
   uint32_t source_width;
   uint32_t source_height;
@@ -61,6 +74,15 @@ struct ResizeImageParameters {
   uint32_t channels;
   uint32_t pixel_count;
 };
+
+struct LanczosWeightParameters {
+  uint32_t source_length;
+  uint32_t target_length;
+  uint32_t radius;
+  uint32_t weight_count;
+};
+
+static_assert(sizeof(LanczosWeightParameters) == 4 * sizeof(uint32_t));
 
 void AddMetalLibraryCandidate(NSMutableArray<NSString*>* paths, NSString* path) {
   if (path.length > 0 && ![paths containsObject:path]) {
@@ -111,6 +133,13 @@ std::string RemapCacheKey(const Camera& source_camera, const Camera& scaled_targ
   return key;
 }
 
+bool CanProjectSimpleRadialToPinholeOnGpu(const Camera& source_camera,
+                                          const Camera& target_camera) {
+  return source_camera.model_id == CameraModelId::kSimpleRadial &&
+         target_camera.model_id == CameraModelId::kPinhole && source_camera.params.size() == 4 &&
+         target_camera.params.size() == 4;
+}
+
 struct CachedRemap {
   std::string key;
   id<MTLBuffer> buffer = nil;
@@ -134,10 +163,14 @@ class MetalImageWarper {
       scaled_target_camera.Rescale(source_camera.width, source_camera.height);
     }
 
-    const std::shared_ptr<CachedRemap> remap =
-        GetOrCreateRemap(source_camera, scaled_target_camera);
-    if (!remap) {
-      return false;
+    const bool project_on_gpu =
+        CanProjectSimpleRadialToPinholeOnGpu(source_camera, scaled_target_camera);
+    std::shared_ptr<CachedRemap> remap;
+    if (!project_on_gpu) {
+      remap = GetOrCreateRemap(source_camera, scaled_target_camera);
+      if (!remap) {
+        return false;
+      }
     }
 
     const bool resize_with_metal = !MetalLanczosDisabled() &&
@@ -162,7 +195,8 @@ class MetalImageWarper {
         return false;
       }
 
-      if (resize_with_metal && !EnsureResizeBuffers(target_camera.width,
+      if (resize_with_metal && !EnsureResizeBuffers(source_camera.width,
+                                                    target_camera.width,
                                                     source_camera.height,
                                                     target_camera.height,
                                                     source_image.Channels())) {
@@ -188,14 +222,34 @@ class MetalImageWarper {
           static_cast<uint32_t>(pixel_count),
       };
 
-      [encoder setComputePipelineState:pipeline_];
-      [encoder setBuffer:input_buffer_ offset:0 atIndex:0];
-      [encoder setBuffer:remap->buffer offset:0 atIndex:1];
-      [encoder setBuffer:output_buffer_ offset:0 atIndex:2];
-      [encoder setBytes:&params length:sizeof(params) atIndex:3];
+      id<MTLComputePipelineState> warp_pipeline = pipeline_;
+      if (project_on_gpu) {
+        const SimpleRadialToPinholeParameters camera_params = {
+            static_cast<float>(source_camera.params[0]),
+            static_cast<float>(source_camera.params[1]),
+            static_cast<float>(source_camera.params[2]),
+            static_cast<float>(source_camera.params[3]),
+            static_cast<float>(scaled_target_camera.params[0]),
+            static_cast<float>(scaled_target_camera.params[1]),
+            static_cast<float>(scaled_target_camera.params[2]),
+            static_cast<float>(scaled_target_camera.params[3]),
+        };
+        warp_pipeline = simple_radial_to_pinhole_pipeline_;
+        [encoder setComputePipelineState:warp_pipeline];
+        [encoder setBuffer:input_buffer_ offset:0 atIndex:0];
+        [encoder setBuffer:output_buffer_ offset:0 atIndex:1];
+        [encoder setBytes:&params length:sizeof(params) atIndex:2];
+        [encoder setBytes:&camera_params length:sizeof(camera_params) atIndex:3];
+      } else {
+        [encoder setComputePipelineState:warp_pipeline];
+        [encoder setBuffer:input_buffer_ offset:0 atIndex:0];
+        [encoder setBuffer:remap->buffer offset:0 atIndex:1];
+        [encoder setBuffer:output_buffer_ offset:0 atIndex:2];
+        [encoder setBytes:&params length:sizeof(params) atIndex:3];
+      }
 
       const NSUInteger thread_width =
-          std::min<NSUInteger>(pipeline_.maxTotalThreadsPerThreadgroup, 256);
+          std::min<NSUInteger>(warp_pipeline.maxTotalThreadsPerThreadgroup, 256);
       [encoder dispatchThreads:MTLSizeMake(pixel_count, 1, 1)
           threadsPerThreadgroup:MTLSizeMake(thread_width, 1, 1)];
       [encoder endEncoding];
@@ -223,7 +277,8 @@ class MetalImageWarper {
         [encoder setComputePipelineState:resize_horizontal_pipeline_];
         [encoder setBuffer:output_buffer_ offset:0 atIndex:0];
         [encoder setBuffer:resize_intermediate_buffer_ offset:0 atIndex:1];
-        [encoder setBytes:&horizontal_params length:sizeof(horizontal_params) atIndex:2];
+        [encoder setBuffer:horizontal_lanczos_weights_ offset:0 atIndex:2];
+        [encoder setBytes:&horizontal_params length:sizeof(horizontal_params) atIndex:3];
         const NSUInteger horizontal_thread_width =
             std::min<NSUInteger>(resize_horizontal_pipeline_.maxTotalThreadsPerThreadgroup, 256);
         [encoder dispatchThreads:MTLSizeMake(horizontal_pixel_count, 1, 1)
@@ -239,7 +294,8 @@ class MetalImageWarper {
         [encoder setComputePipelineState:resize_vertical_pipeline_];
         [encoder setBuffer:resize_intermediate_buffer_ offset:0 atIndex:0];
         [encoder setBuffer:resize_output_buffer_ offset:0 atIndex:1];
-        [encoder setBytes:&vertical_params length:sizeof(vertical_params) atIndex:2];
+        [encoder setBuffer:vertical_lanczos_weights_ offset:0 atIndex:2];
+        [encoder setBytes:&vertical_params length:sizeof(vertical_params) atIndex:3];
         const NSUInteger vertical_thread_width =
             std::min<NSUInteger>(resize_vertical_pipeline_.maxTotalThreadsPerThreadgroup, 256);
         [encoder dispatchThreads:MTLSizeMake(target_pixel_count, 1, 1)
@@ -262,6 +318,7 @@ class MetalImageWarper {
 
     VLOG(1) << "METAL_WARP width=" << source_camera.width << " height=" << source_camera.height
             << " channels=" << source_image.Channels() << " resize_on_gpu=" << resize_with_metal
+            << " projection_on_gpu=" << project_on_gpu
             << " dispatch_and_copy_s=" << gpu_timer.ElapsedSeconds();
 
     if (!resize_with_metal && (target_camera.width != source_camera.width ||
@@ -312,6 +369,32 @@ class MetalImageWarper {
       pipeline_ = [device_ newComputePipelineStateWithFunction:function error:&error];
       if (!pipeline_) {
         LOG(ERROR) << "Failed to create Metal image warp pipeline: "
+                   << error.localizedDescription.UTF8String;
+        return;
+      }
+
+      function = [library_ newFunctionWithName:@"warpImageSimpleRadialToPinhole"];
+      if (!function) {
+        LOG(ERROR) << "Metal simple-radial image warp function is missing";
+        return;
+      }
+      simple_radial_to_pinhole_pipeline_ = [device_ newComputePipelineStateWithFunction:function
+                                                                                  error:&error];
+      if (!simple_radial_to_pinhole_pipeline_) {
+        LOG(ERROR) << "Failed to create Metal simple-radial image warp pipeline: "
+                   << error.localizedDescription.UTF8String;
+        return;
+      }
+
+      function = [library_ newFunctionWithName:@"buildLanczosWeights"];
+      if (!function) {
+        LOG(ERROR) << "Metal Lanczos weight function is missing";
+        return;
+      }
+      lanczos_weight_pipeline_ = [device_ newComputePipelineStateWithFunction:function
+                                                                        error:&error];
+      if (!lanczos_weight_pipeline_) {
+        LOG(ERROR) << "Failed to create Metal Lanczos weight pipeline: "
                    << error.localizedDescription.UTF8String;
         return;
       }
@@ -429,7 +512,72 @@ class MetalImageWarper {
     return true;
   }
 
-  bool EnsureResizeBuffers(const size_t target_width,
+  bool EnsureLanczosWeightBuffer(const size_t source_length,
+                                 const size_t target_length,
+                                 id<MTLBuffer> __strong* buffer,
+                                 size_t* cached_source_length,
+                                 size_t* cached_target_length) {
+    if (*buffer && *cached_source_length == source_length &&
+        *cached_target_length == target_length) {
+      return true;
+    }
+    if (source_length == 0 || target_length == 0 ||
+        source_length > std::numeric_limits<uint32_t>::max() ||
+        target_length > std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
+
+    const float scale = static_cast<float>(source_length) / static_cast<float>(target_length);
+    const size_t radius = static_cast<size_t>(std::ceil(3.0f * scale));
+    const size_t tap_count = 2 * radius + 1;
+    if (target_length > std::numeric_limits<size_t>::max() / tap_count ||
+        target_length * tap_count > std::numeric_limits<uint32_t>::max() ||
+        radius > std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
+
+    const size_t weight_count = target_length * tap_count;
+    id<MTLBuffer> new_buffer = [device_ newBufferWithLength:weight_count * sizeof(float)
+                                                    options:MTLResourceStorageModePrivate];
+    if (!new_buffer) {
+      return false;
+    }
+
+    id<MTLCommandBuffer> command_buffer = [command_queue_ commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+    if (!command_buffer || !encoder) {
+      return false;
+    }
+    const LanczosWeightParameters params = {
+        static_cast<uint32_t>(source_length),
+        static_cast<uint32_t>(target_length),
+        static_cast<uint32_t>(radius),
+        static_cast<uint32_t>(weight_count),
+    };
+    [encoder setComputePipelineState:lanczos_weight_pipeline_];
+    [encoder setBuffer:new_buffer offset:0 atIndex:0];
+    [encoder setBytes:&params length:sizeof(params) atIndex:1];
+    const NSUInteger thread_width =
+        std::min<NSUInteger>(lanczos_weight_pipeline_.maxTotalThreadsPerThreadgroup, 256);
+    [encoder dispatchThreads:MTLSizeMake(weight_count, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(thread_width, 1, 1)];
+    [encoder endEncoding];
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+    if (command_buffer.status != MTLCommandBufferStatusCompleted) {
+      LOG(ERROR) << "Metal Lanczos weight generation failed: "
+                 << command_buffer.error.localizedDescription.UTF8String;
+      return false;
+    }
+
+    *buffer = new_buffer;
+    *cached_source_length = source_length;
+    *cached_target_length = target_length;
+    return true;
+  }
+
+  bool EnsureResizeBuffers(const size_t source_width,
+                           const size_t target_width,
                            const size_t source_height,
                            const size_t target_height,
                            const size_t channels) {
@@ -455,7 +603,16 @@ class MetalImageWarper {
       }
       resize_output_capacity_ = output_num_bytes;
     }
-    return true;
+    return EnsureLanczosWeightBuffer(source_width,
+                                     target_width,
+                                     &horizontal_lanczos_weights_,
+                                     &horizontal_weights_source_length_,
+                                     &horizontal_weights_target_length_) &&
+           EnsureLanczosWeightBuffer(source_height,
+                                     target_height,
+                                     &vertical_lanczos_weights_,
+                                     &vertical_weights_source_length_,
+                                     &vertical_weights_target_length_);
   }
 
   std::once_flag initialize_once_;
@@ -464,6 +621,8 @@ class MetalImageWarper {
   id<MTLCommandQueue> command_queue_ = nil;
   id<MTLLibrary> library_ = nil;
   id<MTLComputePipelineState> pipeline_ = nil;
+  id<MTLComputePipelineState> simple_radial_to_pinhole_pipeline_ = nil;
+  id<MTLComputePipelineState> lanczos_weight_pipeline_ = nil;
   id<MTLComputePipelineState> resize_horizontal_pipeline_ = nil;
   id<MTLComputePipelineState> resize_vertical_pipeline_ = nil;
 
@@ -480,6 +639,12 @@ class MetalImageWarper {
   size_t resize_intermediate_capacity_ = 0;
   id<MTLBuffer> resize_output_buffer_ = nil;
   size_t resize_output_capacity_ = 0;
+  id<MTLBuffer> horizontal_lanczos_weights_ = nil;
+  size_t horizontal_weights_source_length_ = 0;
+  size_t horizontal_weights_target_length_ = 0;
+  id<MTLBuffer> vertical_lanczos_weights_ = nil;
+  size_t vertical_weights_source_length_ = 0;
+  size_t vertical_weights_target_length_ = 0;
 };
 
 MetalImageWarper& ImageWarper() {

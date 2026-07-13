@@ -97,9 +97,8 @@ float interpolateContrast(
     float3 alpha
 ) {
     const float3 dD = derivatives3D(t, x, y, s);
-    const float3 c = dD * alpha;
     const float v = t.read(textureCoord(x, y), s).r;
-    return v + c.x * 0.5;
+    return v + 0.5f * dot(dD, alpha);
 }
 
 
@@ -207,9 +206,6 @@ kernel void siftInterpolate(
     
     float value = dogTextures.read(textureCoord(input.x, input.y), input.scale).r;
         
-    // Note: SiftGPU does not pre-filter below threshold.
-    // Only the post-interpolation check (line 278) applies.
-
     const int maxIterations = parameters.maxIterations;
     const float maxOffset = parameters.maxOffset;
     const int width = parameters.width;
@@ -225,55 +221,47 @@ kernel void siftInterpolate(
         return;
     }
 
-    bool converged = false;
     float3 alpha = float3(0);
 
-    int i = 0;
-    while (i < maxIterations) {
+    for (int i = 0; i < maxIterations; ++i) {
         alpha = interpolationStep(dogTextures, x, y, scale);
         if (!all(isfinite(alpha))) {
             return;
         }
-            
-        if ((abs(alpha.x) < maxOffset) && (abs(alpha.y) < maxOffset) && (abs(alpha.z) < maxOffset)) {
-            converged = true;
+
+        // Match VLFeat's localization: relocate only in image space. The
+        // scale offset remains continuous and is validated after refinement.
+        const int dx = (alpha.x > maxOffset && x < width - 2) ? 1 :
+                       (alpha.x < -maxOffset && x > 1) ? -1 : 0;
+        const int dy = (alpha.y > maxOffset && y < height - 2) ? 1 :
+                       (alpha.y < -maxOffset && y > 1) ? -1 : 0;
+        if (dx == 0 && dy == 0) {
             break;
         }
-            
-        // Whess
-        // coordinate.x += Int(alpha.x.rounded())
-        // coordinate.y += Int(alpha.y.rounded())
-        // coordinate.z += Int(alpha.z.rounded())
-        
-        // IPOL
-        // TODO: >=
-        if (alpha.x > +maxOffset) {
-            x += 1;
+
+        // Do not apply a relocation computed by the final iteration because
+        // there is no subsequent Hessian evaluation at the new position.
+        if (i + 1 == maxIterations) {
+            break;
         }
-        if (alpha.x < -maxOffset) {
-            x -= 1;
-        }
-        if (alpha.y > +maxOffset) {
-            y += 1;
-        }
-        if (alpha.y < -maxOffset) {
-            y -= 1;
-        }
-        if (alpha.z > +maxOffset) {
-            scale += 1;
-        }
-        if (alpha.z < -maxOffset) {
-            scale -= 1;
-        }
-        
+        x += dx;
+        y += dy;
         if (outOfBounds(x, y, scale, width, height, scales)) {
             return;
         }
-        
-        i += 1;
     }
-        
-    if (!converged) {
+
+    // VLFeat accepts a localized offset up to 1.5 samples in all three
+    // dimensions, even when the 0.6 relocation loop reaches its limit.
+    if (any(abs(alpha) >= 1.5f)) {
+        return;
+    }
+    const float refinedX = (float)x + alpha.x;
+    const float refinedY = (float)y + alpha.y;
+    const float refinedScale = (float)scale + alpha.z;
+    if (refinedX < 0.0f || refinedX > (float)(width - 1) ||
+        refinedY < 0.0f || refinedY > (float)(height - 1) ||
+        refinedScale < 0.0f || refinedScale > (float)(scales + 2)) {
         return;
     }
 

@@ -72,6 +72,14 @@ kernel void siftExtremaList(
     const int s = (int)gid.z + 1;
     const float value = inputTexture.read(uint2(g), uint(s)).r;
 
+    // Match VLFeat and SiftGPU by rejecting low-contrast samples before the
+    // 26-neighbor scan. Without this guard, low-contrast extrema can overflow
+    // the bounded candidate buffer and evict valid features before subpixel
+    // localization applies the final contrast threshold.
+    if (abs(value) < 0.8f * parameters.peakThreshold) {
+        return;
+    }
+
     float minimum = +1000;
     float maximum = -1000;
 

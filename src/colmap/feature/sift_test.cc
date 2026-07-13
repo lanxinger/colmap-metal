@@ -46,6 +46,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <numeric>
@@ -246,6 +247,66 @@ Bitmap CreateImageWithRectangle(const int width, const int height) {
   return bitmap;
 }
 
+float HashValueNoise(const int x, const int y, const uint32_t seed) {
+  uint32_t value = static_cast<uint32_t>(x) * 0x9E3779B1u;
+  value ^= static_cast<uint32_t>(y) * 0x85EBCA77u;
+  value ^= seed;
+  value ^= value >> 16;
+  value *= 0x7FEB352Du;
+  value ^= value >> 15;
+  value *= 0x846CA68Bu;
+  value ^= value >> 16;
+  return static_cast<float>(value) /
+             static_cast<float>(std::numeric_limits<uint32_t>::max()) * 2.0f -
+         1.0f;
+}
+
+float Lerp(const float a, const float b, const float t) {
+  return a + (b - a) * t;
+}
+
+Bitmap CreateMultiscaleValueNoiseImage(const int width, const int height) {
+  struct NoiseLayer {
+    int cell_size;
+    float amplitude;
+  };
+  constexpr std::array<NoiseLayer, 6> kLayers = {{{2, 8.0f},
+                                                  {4, 12.0f},
+                                                  {8, 18.0f},
+                                                  {16, 24.0f},
+                                                  {32, 32.0f},
+                                                  {64, 40.0f}}};
+
+  Bitmap bitmap(width, height, false);
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      float pixel = 128.0f;
+      for (size_t layer_idx = 0; layer_idx < kLayers.size(); ++layer_idx) {
+        const auto& layer = kLayers[layer_idx];
+        const int x0 = x / layer.cell_size;
+        const int y0 = y / layer.cell_size;
+        const float tx =
+            static_cast<float>(x % layer.cell_size) / layer.cell_size;
+        const float ty =
+            static_cast<float>(y % layer.cell_size) / layer.cell_size;
+        const uint32_t seed =
+            0x1234567u + static_cast<uint32_t>(layer_idx) * 0x9E3779B9u;
+        const float top = Lerp(
+            HashValueNoise(x0, y0, seed), HashValueNoise(x0 + 1, y0, seed), tx);
+        const float bottom = Lerp(HashValueNoise(x0, y0 + 1, seed),
+                                  HashValueNoise(x0 + 1, y0 + 1, seed),
+                                  tx);
+        pixel += 0.6f * layer.amplitude * Lerp(top, bottom, ty);
+      }
+      bitmap.SetPixel(y,
+                      x,
+                      BitmapColor<uint8_t>(static_cast<uint8_t>(
+                          std::clamp(static_cast<int>(pixel), 0, 255))));
+    }
+  }
+  return bitmap;
+}
+
 void ExpectEquivalentMetalExtraction(
     const sift_metal::ExtractResult& actual,
     const sift_metal::ExtractResult& expected) {
@@ -365,6 +426,30 @@ TEST(ExtractSiftFeaturesMetal, ReusesTexturesAcrossMixedImageSizes) {
                                         &fresh_result));
     ExpectEquivalentMetalExtraction(reused_result, fresh_result);
   }
+}
+
+TEST(ExtractSiftFeaturesMetal, RetainsCpuComparableFeatureYield) {
+  const Bitmap bitmap = CreateMultiscaleValueNoiseImage(512, 768);
+
+  FeatureExtractionOptions cpu_options(FeatureExtractorType::SIFT);
+  cpu_options.use_gpu = false;
+  auto cpu_extractor = CreateSiftFeatureExtractor(cpu_options);
+  FeatureKeypoints cpu_keypoints;
+  FeatureDescriptors cpu_descriptors;
+  ASSERT_TRUE(cpu_extractor->Extract(bitmap, &cpu_keypoints, &cpu_descriptors));
+
+  FeatureExtractionOptions metal_options(FeatureExtractorType::SIFT);
+  metal_options.use_gpu = true;
+  auto metal_extractor = CreateSiftFeatureExtractor(metal_options);
+  FeatureKeypoints metal_keypoints;
+  FeatureDescriptors metal_descriptors;
+  ASSERT_TRUE(
+      metal_extractor->Extract(bitmap, &metal_keypoints, &metal_descriptors));
+
+  ASSERT_GT(cpu_keypoints.size(), 500);
+  EXPECT_GE(metal_keypoints.size() * 100, cpu_keypoints.size() * 88)
+      << "Metal found " << metal_keypoints.size() << " features versus "
+      << cpu_keypoints.size() << " on CPU";
 }
 
 TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {

@@ -1077,6 +1077,7 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
                            options:MTLResourceStorageModeShared];
   SIFTExtremaParameters extrema_params = {};
   extrema_params.capacity = static_cast<uint32_t>(extrema_capacity_);
+  extrema_params.peakThreshold = options_.peak_threshold;
   oct.extremaParamsBuffer =
       [device_ newBufferWithBytes:&extrema_params
                            length:sizeof(SIFTExtremaParameters)

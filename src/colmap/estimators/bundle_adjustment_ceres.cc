@@ -575,8 +575,7 @@ void LogBundleAdjustmentTiming(const BundleAdjustmentConfig& config,
                                const ceres::Solver::Summary& summary) {
 #if CERES_VERSION_MAJOR >= 3 || \
     (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)
-  const bool mixed_precision_solves_used =
-      summary.mixed_precision_solves_used;
+  const bool mixed_precision_solves_used = summary.mixed_precision_solves_used;
 #else
   constexpr bool mixed_precision_solves_used = false;
 #endif

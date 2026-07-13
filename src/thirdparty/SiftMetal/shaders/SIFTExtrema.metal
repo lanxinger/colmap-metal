@@ -72,13 +72,6 @@ kernel void siftExtremaList(
     const int s = (int)gid.z + 1;
     const float value = inputTexture.read(uint2(g), uint(s)).r;
 
-    // Discard low-contrast candidates before the neighbor scan. This matches
-    // SiftGPU's detection threshold (0.8 x DoG threshold); candidates below
-    // it would be rejected by the interpolation pass anyway.
-    if (abs(value) < 0.8f * parameters.peakThreshold) {
-        return;
-    }
-
     float minimum = +1000;
     float maximum = -1000;
 

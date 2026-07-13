@@ -206,9 +206,9 @@ class SiftMetalExtractorImpl {
 
   // Seed textures
   id<MTLTexture> luminosityTexture_;  // R8Unorm, input size
-  id<MTLTexture> scaledTexture_;      // R16Float, seed size (2x)
-  id<MTLTexture> seedTexture_;        // R16Float, seed size (2x)
-  id<MTLTexture> seedConvWorkTexture_; // R16Float, seed size, private
+  id<MTLTexture> scaledTexture_;       // R32Float, seed size (2x)
+  id<MTLTexture> seedTexture_;         // R32Float, seed size (2x)
+  id<MTLTexture> seedConvWorkTexture_; // R32Float, seed size, private
 
   // Seed-stage parameter buffers
   id<MTLBuffer> seedConvWeightsBuffer_;
@@ -903,13 +903,13 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
                                       MTLPixelFormatR8Unorm,
                                       MTLStorageModeShared);
   scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                  MTLPixelFormatR16Float,
+                                  MTLPixelFormatR32Float,
                                   MTLStorageModePrivate);
   seedTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                MTLPixelFormatR16Float,
+                                MTLPixelFormatR32Float,
                                 MTLStorageModePrivate);
   seedConvWorkTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
-                                        MTLPixelFormatR16Float,
+                                        MTLPixelFormatR32Float,
                                         MTLStorageModePrivate);
 
   // Compute seed Gaussian blur kernel.
@@ -1005,12 +1005,11 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
   int numGaussians = num_scales + 3;
   int numDifferences = num_scales + 2;
 
-  // Gaussian images are normalized [0, 1] values; half precision halves
-  // bandwidth and memory on the most heavily trafficked textures. The DoG
-  // textures stay fp32: extrema detection and keypoint interpolation consume
-  // small differences and second derivatives of these values.
+  // Keep the Gaussian pyramid in fp32. DoG extrema and interpolation depend on
+  // small differences between adjacent scales, so rounding either source to
+  // fp16 before subtraction can change detected keypoints near the threshold.
   oct.gaussianTextures = MakeTexture2DArray(
-      device_, w, h, numGaussians, MTLPixelFormatR16Float,
+      device_, w, h, numGaussians, MTLPixelFormatR32Float,
       MTLStorageModePrivate);
   oct.differenceTextures = MakeTexture2DArray(
       device_, w, h, numDifferences, MTLPixelFormatR32Float,
@@ -1029,7 +1028,7 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 
   // Convolution work texture (single-slice private).
   oct.convWorkTexture = MakeTexture2DArray(
-      device_, w, h, 1, MTLPixelFormatR16Float, MTLStorageModePrivate);
+      device_, w, h, 1, MTLPixelFormatR32Float, MTLStorageModePrivate);
 
   // Build convolution parameter buffers for Gaussian series.
   oct.convPairs.resize(numGaussians - 1);
@@ -1078,7 +1077,6 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
                            options:MTLResourceStorageModeShared];
   SIFTExtremaParameters extrema_params = {};
   extrema_params.capacity = static_cast<uint32_t>(extrema_capacity_);
-  extrema_params.peakThreshold = options_.peak_threshold;
   oct.extremaParamsBuffer =
       [device_ newBufferWithBytes:&extrema_params
                            length:sizeof(SIFTExtremaParameters)
@@ -1226,14 +1224,14 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                                           MTLPixelFormatR8Unorm,
                                           MTLStorageModeShared);
       scaledTexture_ = MakeTexture2D(device_, seed_alloc_w, seed_alloc_h,
-                                      MTLPixelFormatR16Float,
+                                      MTLPixelFormatR32Float,
                                       MTLStorageModePrivate);
       seedTexture_ = MakeTexture2D(device_, seed_alloc_w, seed_alloc_h,
-                                    MTLPixelFormatR16Float,
+                                    MTLPixelFormatR32Float,
                                     MTLStorageModePrivate);
       seedConvWorkTexture_ = MakeTexture2D(device_, seed_alloc_w,
                                             seed_alloc_h,
-                                            MTLPixelFormatR16Float,
+                                            MTLPixelFormatR32Float,
                                             MTLStorageModePrivate);
       if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
           !seedConvWorkTexture_) {
@@ -1460,7 +1458,7 @@ void SiftMetalExtractorImpl::EncodeSeedTexture(
   MTLSize grid = {(NSUInteger)(seed_w_ + 15) / 16,
                   (NSUInteger)(seed_h_ + 15) / 16, 1};
 
-  // Bilinear upscale luminosity → scaled. Also converts R8Unorm → R16Float;
+  // Bilinear upscale luminosity → scaled. Also converts R8Unorm → R32Float;
   // at equal sizes the kernel samples exact texel centers, i.e. a plain copy.
   [enc setComputePipelineState:bilinearUpScalePipeline_];
   [enc setTexture:scaledTexture_ atIndex:0];

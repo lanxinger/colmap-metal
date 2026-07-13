@@ -4,12 +4,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Automatic push/pull_request triggers are disabled on this fork: the wheel
-# build fails in install-colmap-macos.sh with a broken Homebrew GLEW package
-# (GLEW_INCLUDE_DIRS-NOTFOUND) before compiling any project code. Run
-# manually via workflow_dispatch or on releases until that is fixed.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - release/*
+  pull_request:
+    types: [ assigned, opened, synchronize, reopened ]
   release:
     types: [ published, edited ]
 
@@ -17,13 +19,18 @@ jobs:
   build:
     name: ${{ matrix.config.os }} ${{ matrix.config.arch }} ${{ matrix.config.cudaEnabled && 'CUDA' || '' }}
     runs-on: ${{ matrix.config.os }}
+    # The macOS wheel currently fails before project compilation because the
+    # Homebrew GLEW package reports GLEW_INCLUDE_DIRS-NOTFOUND. Keep the other
+    # wheel jobs as required PR/push coverage while that runner is repaired;
+    # manual and release builds remain strict.
+    continue-on-error: ${{ matrix.config.experimental && (github.event_name == 'pull_request' || github.event_name == 'push') }}
     strategy:
       matrix:
         config: [
-          {os: ubuntu-24.04, cudaEnabled: false},
-          {os: macos-14, arch: arm64, deploymentTarget: 14.0, cudaEnabled: false},
-          {os: windows-2025, cudaEnabled: false},
-          {os: ubuntu-24.04, cudaEnabled: true},
+          {os: ubuntu-24.04, cudaEnabled: false, experimental: false},
+          {os: macos-14, arch: arm64, deploymentTarget: 14.0, cudaEnabled: false, experimental: true},
+          {os: windows-2025, cudaEnabled: false, experimental: false},
+          {os: ubuntu-24.04, cudaEnabled: true, experimental: false},
         ]
     env:
       COMPILER_CACHE_VERSION: 1

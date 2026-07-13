@@ -19,18 +19,12 @@ jobs:
   build:
     name: ${{ matrix.config.os }} ${{ matrix.config.arch }} ${{ matrix.config.cudaEnabled && 'CUDA' || '' }}
     runs-on: ${{ matrix.config.os }}
-    # The macOS wheel currently fails before project compilation because the
-    # Homebrew GLEW package reports GLEW_INCLUDE_DIRS-NOTFOUND. Keep the other
-    # wheel jobs as required PR/push coverage while that runner is repaired;
-    # manual and release builds remain strict.
-    continue-on-error: ${{ matrix.config.experimental && (github.event_name == 'pull_request' || github.event_name == 'push') }}
     strategy:
       matrix:
         config: [
-          {os: ubuntu-24.04, cudaEnabled: false, experimental: false},
-          {os: macos-14, arch: arm64, deploymentTarget: 14.0, cudaEnabled: false, experimental: true},
-          {os: windows-2025, cudaEnabled: false, experimental: false},
-          {os: ubuntu-24.04, cudaEnabled: true, experimental: false},
+          {os: ubuntu-24.04, cudaEnabled: false},
+          {os: windows-2025, cudaEnabled: false},
+          {os: ubuntu-24.04, cudaEnabled: true},
         ]
     env:
       COMPILER_CACHE_VERSION: 1
@@ -39,9 +33,8 @@ jobs:
       CCACHE_BASEDIR: ${{ github.workspace }}
       FETCHCONTENT_CACHE_VERSION: 1
       FETCHCONTENT_CACHE_DIR: ${{ github.workspace }}/fetchcontent-cache
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.config.deploymentTarget }}
       # For faster builds in PRs, skip all but the oldest Python versions.
-      PULL_REQUEST_CIBW_BUILD: cp311-{macosx,manylinux,win}*
+      PULL_REQUEST_CIBW_BUILD: cp311-{manylinux,win}*
     steps:
       - name: Free disk space
         if: runner.os == 'Linux' && matrix.config.cudaEnabled

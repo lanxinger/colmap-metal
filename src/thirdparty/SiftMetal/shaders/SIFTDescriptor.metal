@@ -7,14 +7,15 @@
 
 #include <metal_stdlib>
 
+#include "Common.hpp"
 #include "../include/SIFTDescriptor.h"
 
 using namespace metal;
 
 
-bool normalizeFeatures(
+static bool normalizeFeatures(
     int count,
-    thread float * features
+    threadgroup float * features
 ) {
     float magnitude = 0;
     for (int i = 0; i < count; i++) {
@@ -34,10 +35,10 @@ bool normalizeFeatures(
     return true;
 }
 
-    
-void thresholdFeatures(
+
+static void thresholdFeatures(
     int count,
-    thread float * features,
+    threadgroup float * features,
     float threshold
 ) {
     for (int i = 0; i < count; i++) {
@@ -45,129 +46,56 @@ void thresholdFeatures(
     }
 }
 
-    
-void storeFeatures(
-    int count,
-    thread float * features,
-    thread float * output
-) {
-    for (int i = 0; i < count; i++) {
-        output[i] = features[i];
-    }
-}
 
-    
-int offset(int x, int y, int b) {
-    const int side = 4;
-    const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
-    return (y * side * bins) + (x * bins) + b;
-}
-
-
-void addValue(
-    thread float * patch,
-    int x,
-    int y,
-    int b,
-    float value
-) {
-    const int side = 4;
-    const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
-    if ((x < 0) || (x >= side) || (y < 0) || (y >= side)) {
-        return;
-    }
-    if (b < 0) {
-        b += bins;
-    }
-    if (b >= bins) {
-        b -= bins;
-    }
-    patch[offset(x, y, b)] += value;
-}
-
-
-void addFeature(
-    thread float * patch,
-    float x,
-    float y,
-    float b,
-    float value
-) {
-    // Integer coordinates of the four pixels surrounding the point x, y
-    const int2 ca = int2(floor(x), floor(y));
-    const int2 cb = int2(ceil(x), floor(y));
-    const int2 cc = int2(ceil(x), ceil(y));
-    const int2 cd = int2(floor(x), ceil(y));
-    
-    // Bins surrounding the bin at index b
-    const int ba = floor(b);
-    const int bb = ceil(b);
-    
-    const float iMax = x - floor(x);
-    const float iMin = 1 - iMax;
-    const float jMax = y - floor(y);
-    const float jMin = 1 - jMax;
-    const float bMax = b - floor(b);
-    const float bMin = 1 - bMax;
-    
-    addValue(patch, ca.x, ca.y, ba, (iMin * jMin * bMin) * value);
-    addValue(patch, ca.x, ca.y, bb, (iMin * jMin * bMax) * value);
-    
-    addValue(patch, cb.x, cb.y, ba, (iMax * jMin * bMin) * value);
-    addValue(patch, cb.x, cb.y, bb, (iMax * jMin * bMax) * value);
-    
-    addValue(patch, cc.x, cc.y, ba, (iMax * jMax * bMin) * value);
-    addValue(patch, cc.x, cc.y, bb, (iMax * jMax * bMax) * value);
-    
-    addValue(patch, cd.x, cd.y, ba, (iMin * jMax * bMin) * value);
-    addValue(patch, cd.x, cd.y, bb, (iMin * jMax * bMax) * value);
-}
-
-    
+// One threadgroup of d*d threads per descriptor. Thread t owns spatial
+// histogram cell (t % d, t / d) and its orientation bins, stored at
+// features[t * bins ... t * bins + bins), which matches the serial layout
+// (y * d + x) * bins + b. Every thread walks the full sampling window (the
+// per-sample texture read and setup are uniform across the threadgroup and
+// served from cache); each applies its own cell's bilinear weight
+// max(0, 1 - |bx - cellX|) * max(0, 1 - |by - cellY|), which reproduces the
+// original scatter exactly, including the degenerate integer-coordinate
+// cases. This removes the previous per-thread 128-float histogram (register
+// spill) and parallelizes the scatter.
 kernel void siftDescriptors(
     device SIFTDescriptorResult * results [[buffer(0)]],
     device SIFTDescriptorInput * inputs [[buffer(1)]],
-    device SIFTDescriptorParameters & parameters [[buffer(2)]],
-    texture2d_array<float, access::read> gradientTextures [[texture(0)]],
-    uint gid [[thread_position_in_grid]]
+    constant SIFTDescriptorParameters & parameters [[buffer(2)]],
+    texture2d_array<float, access::read> gaussianTextures [[texture(0)]],
+    uint groupId [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
-   
-//    let octave = dog.octaves[keypoint.octave]
-    // let images = octave.gaussianImages
-    // let histogramsPerAxis = configuration.descriptorHistogramsPerAxis
-    const SIFTDescriptorInput input = inputs[gid];
-    SIFTDescriptorResult result;
-    result.valid = 0;
-    result.keypoint = input.keypoint;
-    result.theta = input.theta;
-    
-    
-//    let image = octaves[keypoint.octave].gradientImages[keypoint.scale]
-    
-    // let delta = octave.delta
-    // let lambda = configuration.lambdaDescriptor
-    // let a = keypoint.absoluteCoordinate
-    float px = float(input.absoluteX) / parameters.delta;
-    float py = float(input.absoluteY) / parameters.delta;
-
-    // Check that the keypoint is sufficiently far from the edge to include
-    // entire area of the descriptor.
-    
-    // Keep the descriptor bounds check here so descriptor sampling never reads
-    // outside the gradient texture.
-    // let diagonal = Float(2).squareRoot() * lambda * sigma
-    // let f = Float(histogramsPerAxis + 1) / Float(histogramsPerAxis)
-    // let side = Int((diagonal * f).rounded())
-    
-    //let radius = lambda * f
-    const int d = 4; // width of 2d array of histograms
-    const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS;
-    
+    const int d = SIFT_DESCRIPTOR_HISTOGRAM_WIDTH; // 4
+    const int bins = SIFT_DESCRIPTOR_ORIENTATION_BINS; // 8
+    const int featureCount = d * d * bins; // 128
     const float tau = 2 * M_PI_F;
-    if (!isfinite(input.theta)) {
-        results[gid] = result;
+
+    threadgroup float features[SIFT_DESCRIPTOR_FEATURE_COUNT];
+
+    const SIFTDescriptorInput input = inputs[groupId];
+
+    const float px = float(input.absoluteX) / parameters.delta;
+    const float py = float(input.absoluteY) / parameters.delta;
+    const int maxScale = parameters.scalesPerOctave + 2;
+
+    // Keep the descriptor bounds check here so descriptor sampling never
+    // reads outside the gradient source texture. All inputs are uniform
+    // across the threadgroup, so this branch is uniform.
+    const bool valid = isfinite(input.theta) &&
+                       px >= 0.0f && py >= 0.0f &&
+                       px < (float)parameters.width &&
+                       py < (float)parameters.height &&
+                       input.scale >= 0 && input.scale <= maxScale;
+    if (!valid) {
+        if (tid == 0) {
+            device SIFTDescriptorResult & result = results[groupId];
+            result.valid = 0;
+            result.keypoint = input.keypoint;
+            result.theta = input.theta;
+        }
         return;
     }
+
     const float cosT = cos(input.theta);
     const float sinT = sin(input.theta);
     const float binsPerRadian = (float)bins / tau;
@@ -175,26 +103,16 @@ kernel void siftDescriptors(
     const float interval = (float)input.scale + input.subScale;
     const float intervals = (float)parameters.scalesPerOctave;
     const float sigma = 1.6;
-    const float scale = sigma * pow(2.0, interval / intervals); // identical to below
-    // let _sigma = keypoint.sigma / octave.delta // identical to above
+    const float scale = sigma * pow(2.0, interval / intervals);
     const float histogramWidth = 3.0 * scale; // 3.0 constant from Whess (OpenSIFT)
     const int radius = histogramWidth * sqrt(2.0) * ((float)d + 1.0) * 0.5 + 0.5;
-    
-    const int maxScale = parameters.scalesPerOctave + 2;
 
-    if (px < 0.0f || py < 0.0f ||
-        px >= (float)parameters.width || py >= (float)parameters.height ||
-        input.scale < 0 || input.scale > maxScale) {
-        results[gid] = result;
-        return;
-    }
-
-    // Create histograms
-    const int featureCount = d * d * bins;
-    float features[featureCount];
-    
-    for (int i = 0; i < featureCount; i++) {
-        features[i] = 0;
+    // This thread's histogram cell and its bins.
+    const int cellX = int(tid) % d;
+    const int cellY = int(tid) / d;
+    threadgroup float * cell = features + tid * bins;
+    for (int b = 0; b < bins; b++) {
+        cell[b] = 0;
     }
 
     for (int j = -radius; j <= +radius; j++) {
@@ -214,9 +132,9 @@ kernel void siftDescriptors(
             if (!isfinite(bx) || !isfinite(by)) {
                 continue;
             }
-            
-            float2 g = gradientTextures.read(
-                uint2(uint(sampleX), uint(sampleY)), input.scale).rg;
+
+            float2 g = siftGradientAt(
+                gaussianTextures, sampleX, sampleY, uint(input.scale));
             if (!all(isfinite(g)) || g.g <= 0.0f) {
                 continue;
             }
@@ -242,28 +160,57 @@ kernel void siftDescriptors(
             if (!isfinite(value) || value <= 0.0f) {
                 continue;
             }
-            
-            addFeature(features, bx, by, bin, value);
+
+            // Gather: this cell's share of the bilinear scatter.
+            const float wx = 1.0f - abs(bx - (float)cellX);
+            const float wy = 1.0f - abs(by - (float)cellY);
+            if (wx <= 0.0f || wy <= 0.0f) {
+                continue;
+            }
+            const float wxy = wx * wy * value;
+
+            int ba = int(floor(bin));
+            int bb = int(ceil(bin));
+            const float bMax = bin - floor(bin);
+            const float bMin = 1 - bMax;
+            if (ba < 0) {
+                ba += bins;
+            }
+            if (ba >= bins) {
+                ba -= bins;
+            }
+            if (bb < 0) {
+                bb += bins;
+            }
+            if (bb >= bins) {
+                bb -= bins;
+            }
+            cell[ba] += wxy * bMin;
+            cell[bb] += wxy * bMax;
         }
     }
-    
-    // print("feature x=\(Int(a.x)) y=\(Int(a.y)) scale=\(scale) sigma=\(_sigma) histogramWidth=\(histogramWidth) radius=\(radius)")
-    
-    // Serialize histograms into array
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Normalization touches only 128 values; run it serially.
+    if (tid != 0) {
+        return;
+    }
+    device SIFTDescriptorResult & result = results[groupId];
+    result.keypoint = input.keypoint;
+    result.theta = input.theta;
+
     if (!normalizeFeatures(featureCount, features)) {
-        results[gid] = result;
+        result.valid = 0;
         return;
     }
     thresholdFeatures(featureCount, features, 0.2);
     if (!normalizeFeatures(featureCount, features)) {
-        results[gid] = result;
+        result.valid = 0;
         return;
     }
-    storeFeatures(featureCount, features, result.features);
-    
+    for (int i = 0; i < featureCount; i++) {
+        result.features[i] = features[i];
+    }
     result.valid = 1;
-    result.keypoint = input.keypoint;
-    result.theta = input.theta;
-    
-    results[gid] = result;
 }

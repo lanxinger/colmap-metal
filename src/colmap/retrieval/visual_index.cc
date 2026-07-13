@@ -462,8 +462,8 @@ class FaissVisualIndex : public VisualIndex {
 #endif
     THROW_CHECK_NOTNULL(fin);
     fseek(fin, offset, SEEK_SET);
-    index_ = std::unique_ptr<faiss::Index>(THROW_CHECK_NOTNULL(
-        faiss::read_index(fin)));
+    index_ = std::unique_ptr<faiss::Index>(
+        THROW_CHECK_NOTNULL(faiss::read_index(fin)));
     offset = ftell(fin);
     fclose(fin);
 

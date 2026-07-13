@@ -56,12 +56,14 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <type_traits>
 
 #include <Eigen/Geometry>
 
@@ -94,6 +96,52 @@ bool SiftMatchingOptions::Check() const {
 }
 
 namespace {
+
+#if defined(COLMAP_GPU_ENABLED)
+uint64_t HashBytes(uint64_t hash, const void* data, size_t num_bytes) {
+  constexpr uint64_t kFnvPrime = 1099511628211ULL;
+  const auto* bytes = static_cast<const uint8_t*>(data);
+  for (size_t i = 0; i < num_bytes; ++i) {
+    hash ^= bytes[i];
+    hash *= kFnvPrime;
+  }
+  return hash;
+}
+
+template <typename T>
+uint64_t HashValue(uint64_t hash, const T& value) {
+  return HashBytes(hash, &value, sizeof(value));
+}
+
+#if !defined(COLMAP_METAL_ENABLED)
+uint64_t HashFeatureDescriptors(const FeatureDescriptors& descriptors) {
+  uint64_t hash = 14695981039346656037ULL;
+  hash = HashValue(hash, descriptors.data.rows());
+  hash = HashValue(hash, descriptors.data.cols());
+  return HashBytes(hash,
+                   descriptors.data.data(),
+                   static_cast<size_t>(descriptors.data.size()));
+}
+#endif  // COLMAP_METAL_ENABLED
+
+uint64_t HashFeatureKeypoints(const FeatureKeypoints& keypoints) {
+  static_assert(std::is_trivially_copyable_v<FeatureKeypoint>);
+  uint64_t hash = 14695981039346656037ULL;
+  hash = HashValue(hash, keypoints.size());
+  return HashBytes(
+      hash, keypoints.data(), keypoints.size() * sizeof(FeatureKeypoint));
+}
+
+uint64_t HashCameraForNormalization(const Camera& camera) {
+  uint64_t hash = 14695981039346656037ULL;
+  hash = HashValue(hash, camera.model_id);
+  hash = HashValue(hash, camera.width);
+  hash = HashValue(hash, camera.height);
+  hash = HashValue(hash, camera.params.size());
+  return HashBytes(
+      hash, camera.params.data(), camera.params.size() * sizeof(double));
+}
+#endif  // COLMAP_GPU_ENABLED
 
 void WarnDarknessAdaptivityNotAvailable() {
   LOG(WARNING) << "Darkness adaptivity only available for GLSL SiftGPU.";
@@ -793,7 +841,8 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
 
     sift_metal::ExtractResult metal_result;
     if (!extractor_.Extract(bitmap.RowMajorData().data(),
-                            bitmap.Width(), bitmap.Height(),
+                            bitmap.Width(),
+                            bitmap.Height(),
                             &metal_result)) {
       return false;
     }
@@ -805,15 +854,11 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
       (*keypoints)[i] = FeatureKeypoint(kp.x, kp.y, kp.sigma, kp.orientation);
     }
 
-    // Normalize and quantize descriptors.
-    FeatureDescriptorsFloatData descriptors_float(num_features,
-                                                   kSiftDescriptorDim);
-    for (size_t i = 0; i < num_features; ++i) {
-      for (int j = 0; j < kSiftDescriptorDim; ++j) {
-        descriptors_float(i, j) =
-            metal_result.descriptors[i * kSiftDescriptorDim + j];
-      }
-    }
+    // Normalize and quantize descriptors. The Metal extractor returns
+    // row-major [num_features x 128] floats, matching the Eigen layout.
+    FeatureDescriptorsFloatData descriptors_float =
+        Eigen::Map<const FeatureDescriptorsFloatData>(
+            metal_result.descriptors.data(), num_features, kSiftDescriptorDim);
 
     if (options_.sift->normalization ==
         SiftExtractionOptions::Normalization::L2) {
@@ -1518,12 +1563,13 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     const FeatureKeypoints* source_keypoints = nullptr;
     const Camera* camera = nullptr;
     size_t num_keypoints = 0;
+    uint64_t keypoints_hash = 0;
+    uint64_t camera_hash = 0;
     std::vector<sift_metal::MatchKeypoint> keypoints;
   };
 
   const std::vector<sift_metal::MatchKeypoint>& GetRawMetalKeypoints(
-      const Image& image,
-      std::vector<sift_metal::MatchKeypoint>* scratch) {
+      const Image& image, std::vector<sift_metal::MatchKeypoint>* scratch) {
     if (image.image_id == kInvalidImageId) {
       ToMetalMatchKeypoints(*image.keypoints, scratch);
       return *scratch;
@@ -1531,19 +1577,22 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
 
     MetalKeypointCacheEntry& entry = raw_metal_keypoint_cache_[image.image_id];
     const FeatureKeypoints* keypoints = image.keypoints.get();
+    const uint64_t keypoints_hash = HashFeatureKeypoints(*keypoints);
     if (entry.source_keypoints != keypoints ||
-        entry.num_keypoints != keypoints->size()) {
+        entry.num_keypoints != keypoints->size() ||
+        entry.keypoints_hash != keypoints_hash) {
       ToMetalMatchKeypoints(*keypoints, &entry.keypoints);
       entry.source_keypoints = keypoints;
       entry.camera = nullptr;
       entry.num_keypoints = keypoints->size();
+      entry.keypoints_hash = keypoints_hash;
+      entry.camera_hash = 0;
     }
     return entry.keypoints;
   }
 
   const std::vector<sift_metal::MatchKeypoint>& GetNormalizedMetalKeypoints(
-      const Image& image,
-      std::vector<sift_metal::MatchKeypoint>* scratch) {
+      const Image& image, std::vector<sift_metal::MatchKeypoint>* scratch) {
     if (image.image_id == kInvalidImageId) {
       const FeatureKeypoints normalized_keypoints =
           NormalizeFeatureKeypoints(*image.camera, *image.keypoints);
@@ -1554,14 +1603,20 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     MetalKeypointCacheEntry& entry =
         normalized_metal_keypoint_cache_[image.image_id];
     const FeatureKeypoints* keypoints = image.keypoints.get();
+    const uint64_t keypoints_hash = HashFeatureKeypoints(*keypoints);
+    const uint64_t camera_hash = HashCameraForNormalization(*image.camera);
     if (entry.source_keypoints != keypoints || entry.camera != image.camera ||
-        entry.num_keypoints != keypoints->size()) {
+        entry.num_keypoints != keypoints->size() ||
+        entry.keypoints_hash != keypoints_hash ||
+        entry.camera_hash != camera_hash) {
       const FeatureKeypoints normalized_keypoints =
           NormalizeFeatureKeypoints(*image.camera, *image.keypoints);
       ToMetalMatchKeypoints(normalized_keypoints, &entry.keypoints);
       entry.source_keypoints = keypoints;
       entry.camera = image.camera;
       entry.num_keypoints = keypoints->size();
+      entry.keypoints_hash = keypoints_hash;
+      entry.camera_hash = camera_hash;
     }
     return entry.keypoints;
   }
@@ -1674,20 +1729,33 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
           *sift_opengl_mutexes_.at(sift_match_gpu_.gpu_index));
     }
 
+    const uint64_t descriptors_hash1 =
+        HashFeatureDescriptors(*image1.descriptors);
+    const uint64_t descriptors_hash2 =
+        HashFeatureDescriptors(*image2.descriptors);
+
     if (prev_image_id1_ == kInvalidImageId || prev_is_guided_ ||
-        prev_image_id1_ != image1.image_id) {
+        prev_image_id1_ != image1.image_id ||
+        prev_descriptors1_ != image1.descriptors.get() ||
+        prev_descriptors_hash1_ != descriptors_hash1) {
       WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
       sift_match_gpu_.SetDescriptors(
           0, image1.descriptors->data.rows(), image1.descriptors->data.data());
       prev_image_id1_ = image1.image_id;
+      prev_descriptors1_ = image1.descriptors.get();
+      prev_descriptors_hash1_ = descriptors_hash1;
     }
 
     if (prev_image_id2_ == kInvalidImageId || prev_is_guided_ ||
-        prev_image_id2_ != image2.image_id) {
+        prev_image_id2_ != image2.image_id ||
+        prev_descriptors2_ != image2.descriptors.get() ||
+        prev_descriptors_hash2_ != descriptors_hash2) {
       WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
       sift_match_gpu_.SetDescriptors(
           1, image2.descriptors->data.rows(), image2.descriptors->data.data());
       prev_image_id2_ = image2.image_id;
+      prev_descriptors2_ = image2.descriptors.get();
+      prev_descriptors_hash2_ = descriptors_hash2;
     }
 
     prev_is_guided_ = false;
@@ -1744,8 +1812,24 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
         two_view_geometry->config == TwoViewGeometry::CALIBRATED ||
         two_view_geometry->config == TwoViewGeometry::CALIBRATED_RIG;
 
+    const uint64_t descriptors_hash1 =
+        HashFeatureDescriptors(*image1.descriptors);
+    const uint64_t descriptors_hash2 =
+        HashFeatureDescriptors(*image2.descriptors);
+    const uint64_t keypoints_hash1 = HashFeatureKeypoints(*image1.keypoints);
+    const uint64_t keypoints_hash2 = HashFeatureKeypoints(*image2.keypoints);
+    const uint64_t camera_hash1 =
+        use_essential_matrix ? HashCameraForNormalization(*image1.camera) : 0;
+    const uint64_t camera_hash2 =
+        use_essential_matrix ? HashCameraForNormalization(*image2.camera) : 0;
+
     if (prev_image_id1_ == kInvalidImageId || !prev_is_guided_ ||
         prev_image_id1_ != image1.image_id ||
+        prev_descriptors1_ != image1.descriptors.get() ||
+        prev_keypoints1_ != image1.keypoints.get() ||
+        prev_descriptors_hash1_ != descriptors_hash1 ||
+        prev_keypoints_hash1_ != keypoints_hash1 ||
+        prev_camera_hash1_ != camera_hash1 ||
         use_essential_matrix != prev_use_essential_matrix_) {
       WarnIfMaxNumMatchesReachedGPU(image1.descriptors->data);
       constexpr size_t kIndex = 0;
@@ -1766,10 +1850,20 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
             kFeatureShapeNumElems);
       }
       prev_image_id1_ = image1.image_id;
+      prev_descriptors1_ = image1.descriptors.get();
+      prev_keypoints1_ = image1.keypoints.get();
+      prev_descriptors_hash1_ = descriptors_hash1;
+      prev_keypoints_hash1_ = keypoints_hash1;
+      prev_camera_hash1_ = camera_hash1;
     }
 
     if (prev_image_id2_ == kInvalidImageId || !prev_is_guided_ ||
         prev_image_id2_ != image2.image_id ||
+        prev_descriptors2_ != image2.descriptors.get() ||
+        prev_keypoints2_ != image2.keypoints.get() ||
+        prev_descriptors_hash2_ != descriptors_hash2 ||
+        prev_keypoints_hash2_ != keypoints_hash2 ||
+        prev_camera_hash2_ != camera_hash2 ||
         use_essential_matrix != prev_use_essential_matrix_) {
       WarnIfMaxNumMatchesReachedGPU(image2.descriptors->data);
       constexpr size_t kIndex = 1;
@@ -1790,6 +1884,11 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
             kFeatureShapeNumElems);
       }
       prev_image_id2_ = image2.image_id;
+      prev_descriptors2_ = image2.descriptors.get();
+      prev_keypoints2_ = image2.keypoints.get();
+      prev_descriptors_hash2_ = descriptors_hash2;
+      prev_keypoints_hash2_ = keypoints_hash2;
+      prev_camera_hash2_ = camera_hash2;
     }
 
     prev_is_guided_ = true;
@@ -1873,6 +1972,18 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
   bool prev_use_essential_matrix_ = false;
   image_t prev_image_id1_ = kInvalidImageId;
   image_t prev_image_id2_ = kInvalidImageId;
+  // Data uploaded for the previous image ids. An image may be re-posted with
+  // the same id but updated keypoints/descriptors, which must be re-uploaded.
+  const FeatureKeypoints* prev_keypoints1_ = nullptr;
+  const FeatureKeypoints* prev_keypoints2_ = nullptr;
+  const FeatureDescriptors* prev_descriptors1_ = nullptr;
+  const FeatureDescriptors* prev_descriptors2_ = nullptr;
+  uint64_t prev_descriptors_hash1_ = 0;
+  uint64_t prev_descriptors_hash2_ = 0;
+  uint64_t prev_keypoints_hash1_ = 0;
+  uint64_t prev_keypoints_hash2_ = 0;
+  uint64_t prev_camera_hash1_ = 0;
+  uint64_t prev_camera_hash2_ = 0;
 };
 #endif  // COLMAP_GPU_ENABLED && !COLMAP_METAL_ENABLED
 

@@ -12,13 +12,13 @@
 
 // This should match SIFTInterpolateInputKeypoint
 struct SIFTExtremaResult {
-    int32_t x;
-    int32_t y;
-    int32_t scale;
+  int32_t x;
+  int32_t y;
+  int32_t scale;
 };
 
 struct SIFTExtremaParameters {
-    uint32_t capacity;
+  uint32_t capacity;
 };
 
 #endif /* SIFTExtrema_h */

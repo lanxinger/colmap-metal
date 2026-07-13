@@ -12,7 +12,6 @@ set(METAL_SHADERS
     ${SIFT_METAL_SHADER_DIR}/NearestNeighborDownScale.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTDescriptor.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTExtrema.metal
-    ${SIFT_METAL_SHADER_DIR}/SIFTGradient.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTInterpolate.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTMatcher.metal
     ${SIFT_METAL_SHADER_DIR}/SIFTOrientation.metal
@@ -23,6 +22,7 @@ set(METAL_SHADER_HEADERS
     ${SIFT_METAL_SHADER_DIR}/Common.hpp
     ${SIFT_METAL_INCLUDE_DIR}/ConvolutionSeries.h
     ${SIFT_METAL_INCLUDE_DIR}/NearestNeighbor.h
+    ${SIFT_METAL_INCLUDE_DIR}/SeedStage.h
     ${SIFT_METAL_INCLUDE_DIR}/SIFTDescriptor.h
     ${SIFT_METAL_INCLUDE_DIR}/SIFTExtrema.h
     ${SIFT_METAL_INCLUDE_DIR}/SIFTInterpolate.h

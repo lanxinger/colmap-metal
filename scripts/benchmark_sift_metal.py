@@ -21,7 +21,9 @@ def parse_args() -> argparse.Namespace:
             "comparing CPU matching with Metal matching."
         )
     )
-    parser.add_argument("image_path", type=Path, help="Directory of input images")
+    parser.add_argument(
+        "image_path", type=Path, help="Directory of input images"
+    )
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -61,7 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-geometric-verification",
         action="store_true",
-        help="Pass FeatureMatching.skip_geometric_verification to matching runs",
+        help="Pass FeatureMatching.skip_geometric_verification to "
+        "matching runs",
     )
     parser.add_argument(
         "--keep-workspace",
@@ -125,9 +128,13 @@ def db_stats(database: Path) -> dict[str, int]:
     with sqlite3.connect(database) as conn:
         return {
             "images": db_scalar(conn, "select count(*) from images"),
-            "keypoints": db_scalar(conn, "select coalesce(sum(rows), 0) from keypoints"),
+            "keypoints": db_scalar(
+                conn, "select coalesce(sum(rows), 0) from keypoints"
+            ),
             "match_pairs": db_scalar(conn, "select count(*) from matches"),
-            "raw_matches": db_scalar(conn, "select coalesce(sum(rows), 0) from matches"),
+            "raw_matches": db_scalar(
+                conn, "select coalesce(sum(rows), 0) from matches"
+            ),
             "verified_pairs": db_scalar(
                 conn, "select count(*) from two_view_geometries where rows > 0"
             ),
@@ -184,43 +191,60 @@ def run_mapper_and_analyzer(
         ],
         cwd,
     )
-    model_path = sparse_path / "0"
-    analyzer_metrics = {}
-    analyzer_seconds = None
-    if model_path.exists():
+    result = {
+        "mapper_seconds": mapper["seconds"],
+    }
+    result.update(run_largest_model_analyzer(colmap, sparse_path, cwd))
+    return result
+
+
+def run_largest_model_analyzer(
+    colmap: Path, sparse_path: Path, cwd: Path
+) -> dict[str, object]:
+    if not sparse_path.exists():
+        return {
+            "model_path": str(sparse_path / "0"),
+            "model_analyzer": {},
+            "num_models": 0,
+        }
+
+    analyses = []
+    model_paths = sorted(
+        (
+            path
+            for path in sparse_path.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ),
+        key=lambda path: int(path.name),
+    )
+    for model_path in model_paths:
         analyzer = run_command(
-            f"model_analyzer {workspace.name}",
+            f"model_analyzer {sparse_path.parent.name}/{model_path.name}",
             [str(colmap), "model_analyzer", "--path", str(model_path)],
             cwd,
         )
-        analyzer_seconds = analyzer["seconds"]
-        analyzer_metrics = parse_model_analyzer(str(analyzer["output"]))
+        metrics = parse_model_analyzer(str(analyzer["output"]))
+        analyses.append((model_path, analyzer["seconds"], metrics))
 
-    return {
-        "mapper_seconds": mapper["seconds"],
-        "model_path": str(model_path),
-        "model_analyzer_seconds": analyzer_seconds,
-        "model_analyzer": analyzer_metrics,
-    }
-
-
-def run_model_analyzer_if_available(
-    colmap: Path, model_path: Path, cwd: Path
-) -> dict[str, object]:
-    if not model_path.exists():
+    if not analyses:
         return {
-            "model_path": str(model_path),
+            "model_path": str(sparse_path / "0"),
             "model_analyzer": {},
+            "num_models": 0,
         }
-    analyzer = run_command(
-        f"model_analyzer {model_path.parent.parent.name}",
-        [str(colmap), "model_analyzer", "--path", str(model_path)],
-        cwd,
+
+    model_path, analyzer_seconds, analyzer_metrics = max(
+        analyses,
+        key=lambda analysis: (
+            int(analysis[2].get("registered_images", 0)),
+            int(analysis[2].get("points", 0)),
+        ),
     )
     return {
         "model_path": str(model_path),
-        "model_analyzer_seconds": analyzer["seconds"],
-        "model_analyzer": parse_model_analyzer(str(analyzer["output"])),
+        "model_analyzer_seconds": analyzer_seconds,
+        "model_analyzer": analyzer_metrics,
+        "num_models": len(analyses),
     }
 
 
@@ -265,7 +289,7 @@ def run_automatic_benchmark(
         "db_stats": db_stats(workspace / "database.db"),
     }
     result.update(
-        run_model_analyzer_if_available(colmap, workspace / "sparse/0", repo_root)
+        run_largest_model_analyzer(colmap, workspace / "sparse", repo_root)
     )
     return result
 
@@ -386,7 +410,8 @@ def main() -> int:
     print(json.dumps(result, indent=2, sort_keys=True))
     print(
         f"matching speedup: {speedup:.2f}x "
-        f"({float(before_seconds):.2f}s cpu / {float(after_seconds):.2f}s metal)",
+        f"({float(before_seconds):.2f}s cpu / "
+        f"{float(after_seconds):.2f}s metal)",
         file=sys.stderr,
     )
     return 0
@@ -397,4 +422,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as error:
         print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from error

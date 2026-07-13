@@ -44,9 +44,12 @@
 #include "thirdparty/SiftMetal/SiftMetal.h"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <limits>
+#include <numeric>
+#include <tuple>
 
 namespace colmap {
 namespace {
@@ -126,7 +129,7 @@ TwoViewGeometry CreatePlanarTwoViewGeometry() {
   return tvg;
 }
 
-void RunGpuTest(std::function<void()> test_body) {
+void RunGpuTest(const std::function<void()>& test_body) {
 #if defined(COLMAP_METAL_ENABLED) || defined(COLMAP_CUDA_ENABLED)
   test_body();
 #elif defined(COLMAP_GPU_ENABLED) && defined(COLMAP_GUI_ENABLED)
@@ -232,6 +235,53 @@ TEST(ExtractSiftFeaturesGPU, Nominal) {
 }
 
 #if defined(COLMAP_METAL_ENABLED)
+Bitmap CreateImageWithRectangle(const int width, const int height) {
+  Bitmap bitmap(width, height, false);
+  bitmap.Fill(BitmapColor<uint8_t>(0, 0, 0));
+  for (int r = height / 4; r < 3 * height / 4; ++r) {
+    for (int c = width / 4; c < 3 * width / 4; ++c) {
+      bitmap.SetPixel(r, c, BitmapColor<uint8_t>(255));
+    }
+  }
+  return bitmap;
+}
+
+void ExpectEquivalentMetalExtraction(
+    const sift_metal::ExtractResult& actual,
+    const sift_metal::ExtractResult& expected) {
+  ASSERT_EQ(actual.keypoints.size(), expected.keypoints.size());
+  ASSERT_EQ(actual.descriptors.size(), expected.descriptors.size());
+
+  auto SortedIndices = [](const sift_metal::ExtractResult& result) {
+    std::vector<size_t> indices(result.keypoints.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(), [&](size_t lhs, size_t rhs) {
+      const auto& a = result.keypoints[lhs];
+      const auto& b = result.keypoints[rhs];
+      return std::tie(a.x, a.y, a.sigma, a.orientation) <
+             std::tie(b.x, b.y, b.sigma, b.orientation);
+    });
+    return indices;
+  };
+
+  const std::vector<size_t> actual_indices = SortedIndices(actual);
+  const std::vector<size_t> expected_indices = SortedIndices(expected);
+  for (size_t i = 0; i < actual_indices.size(); ++i) {
+    const size_t actual_idx = actual_indices[i];
+    const size_t expected_idx = expected_indices[i];
+    const auto& actual_keypoint = actual.keypoints[actual_idx];
+    const auto& expected_keypoint = expected.keypoints[expected_idx];
+    EXPECT_FLOAT_EQ(actual_keypoint.x, expected_keypoint.x);
+    EXPECT_FLOAT_EQ(actual_keypoint.y, expected_keypoint.y);
+    EXPECT_FLOAT_EQ(actual_keypoint.sigma, expected_keypoint.sigma);
+    EXPECT_FLOAT_EQ(actual_keypoint.orientation, expected_keypoint.orientation);
+    for (size_t j = 0; j < 128; ++j) {
+      EXPECT_FLOAT_EQ(actual.descriptors[actual_idx * 128 + j],
+                      expected.descriptors[expected_idx * 128 + j]);
+    }
+  }
+}
+
 TEST(ExtractSiftFeaturesMetal, RejectsNonPositiveFeatureLimit) {
   sift_metal::Options options;
   options.max_num_features = 0;
@@ -281,13 +331,40 @@ TEST(ExtractSiftFeaturesMetal, AllowsOrientationExpandedDescriptorLimit) {
   ASSERT_TRUE(extractor.Init(options, bitmap.Width(), bitmap.Height()));
 
   sift_metal::ExtractResult result;
-  ASSERT_TRUE(extractor.Extract(bitmap.RowMajorData().data(),
-                                bitmap.Width(),
-                                bitmap.Height(),
-                                &result));
+  ASSERT_TRUE(extractor.Extract(
+      bitmap.RowMajorData().data(), bitmap.Width(), bitmap.Height(), &result));
   EXPECT_GT(result.keypoints.size(), 1);
   EXPECT_LE(result.keypoints.size(), 2);
   EXPECT_EQ(result.descriptors.size(), result.keypoints.size() * 128);
+}
+
+TEST(ExtractSiftFeaturesMetal, ReusesTexturesAcrossMixedImageSizes) {
+  const std::array<Bitmap, 3> bitmaps = {
+      CreateImageWithRectangle(257, 193),
+      CreateImageWithRectangle(193, 257),
+      CreateImageWithRectangle(321, 181),
+  };
+  sift_metal::Options options;
+  sift_metal::SiftMetalExtractor reused_extractor;
+  ASSERT_TRUE(
+      reused_extractor.Init(options, bitmaps[0].Width(), bitmaps[0].Height()));
+
+  for (const Bitmap& bitmap : bitmaps) {
+    sift_metal::ExtractResult reused_result;
+    ASSERT_TRUE(reused_extractor.Extract(bitmap.RowMajorData().data(),
+                                         bitmap.Width(),
+                                         bitmap.Height(),
+                                         &reused_result));
+
+    sift_metal::SiftMetalExtractor fresh_extractor;
+    ASSERT_TRUE(fresh_extractor.Init(options, bitmap.Width(), bitmap.Height()));
+    sift_metal::ExtractResult fresh_result;
+    ASSERT_TRUE(fresh_extractor.Extract(bitmap.RowMajorData().data(),
+                                        bitmap.Width(),
+                                        bitmap.Height(),
+                                        &fresh_result));
+    ExpectEquivalentMetalExtraction(reused_result, fresh_result);
+  }
 }
 
 TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
@@ -298,29 +375,20 @@ TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
   sift_metal::MatchOptions options;
   std::vector<sift_metal::MatchResult> matches = {{0, 0}};
 
-  EXPECT_FALSE(matcher.Match(nullptr,
-                             1,
-                             descriptor.data(),
-                             1,
-                             options,
-                             &matches));
+  EXPECT_FALSE(
+      matcher.Match(nullptr, 1, descriptor.data(), 1, options, &matches));
   EXPECT_TRUE(matches.empty());
 
   matches = {{0, 0}};
   options.max_ratio = 0.0f;
-  EXPECT_FALSE(matcher.Match(descriptor.data(),
-                             1,
-                             descriptor.data(),
-                             1,
-                             options,
-                             &matches));
+  EXPECT_FALSE(matcher.Match(
+      descriptor.data(), 1, descriptor.data(), 1, options, &matches));
   EXPECT_TRUE(matches.empty());
 
   matches = {{0, 0}};
   options.max_ratio = 0.8f;
-  const std::array<float, 9> identity = {1.0f, 0.0f, 0.0f,
-                                         0.0f, 1.0f, 0.0f,
-                                         0.0f, 0.0f, 1.0f};
+  const std::array<float, 9> identity = {
+      1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
   EXPECT_FALSE(matcher.MatchGuided(descriptor.data(),
                                    1,
                                    nullptr,
@@ -904,8 +972,7 @@ TEST(MatchSiftFeaturesGPU, Nominal) {
   });
 }
 
-#if defined(COLMAP_METAL_ENABLED)
-TEST(MatchSiftFeaturesGPU, RefreshesReusedDescriptorPointer) {
+TEST(MatchSiftFeaturesGPU, RefreshesInPlaceDescriptorMutation) {
   RunGpuTest([] {
     const Camera camera = Camera::CreateFromModelId(
         1, CameraModelId::kSimplePinhole, 100.0, 100, 200);
@@ -913,12 +980,14 @@ TEST(MatchSiftFeaturesGPU, RefreshesReusedDescriptorPointer) {
         std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2));
     auto descriptors2 = std::make_shared<FeatureDescriptors>(
         CreateReversedDescriptors(*descriptors1));
-    const FeatureMatcher::Image image1 = {
-        /*image_id=*/1, /*camera=*/&camera, /*keypoints=*/nullptr,
-        descriptors1};
-    const FeatureMatcher::Image image2 = {
-        /*image_id=*/2, /*camera=*/&camera, /*keypoints=*/nullptr,
-        descriptors2};
+    const FeatureMatcher::Image image1 = {/*image_id=*/1,
+                                          /*camera=*/&camera,
+                                          /*keypoints=*/nullptr,
+                                          descriptors1};
+    const FeatureMatcher::Image image2 = {/*image_id=*/2,
+                                          /*camera=*/&camera,
+                                          /*keypoints=*/nullptr,
+                                          descriptors2};
 
     FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
     options.use_gpu = true;
@@ -941,7 +1010,6 @@ TEST(MatchSiftFeaturesGPU, RefreshesReusedDescriptorPointer) {
     ExpectIdentityMatches(matches);
   });
 }
-#endif
 
 TEST(MatchSiftFeaturesCPUvsGPU, Nominal) {
   RunGpuTest([] {
@@ -1086,11 +1154,12 @@ TEST(MatchGuidedSiftFeaturesGPU, Nominal) {
         /*camera=*/&camera,
         std::make_shared<FeatureKeypoints>(0),
         std::make_shared<FeatureDescriptors>(CreateEmptyDescriptors())};
+    auto keypoints1 = std::make_shared<FeatureKeypoints>(
+        std::vector<FeatureKeypoint>{{1, 0}, {2, 0}});
     const FeatureMatcher::Image image1 = {
         /*image_id=*/1,
         /*camera=*/&camera,
-        std::make_shared<FeatureKeypoints>(
-            std::vector<FeatureKeypoint>{{1, 0}, {2, 0}}),
+        keypoints1,
         std::make_shared<FeatureDescriptors>(
             CreateRandomFeatureDescriptors(2))};
     const FeatureMatcher::Image image2 = {
@@ -1128,6 +1197,13 @@ TEST(MatchGuidedSiftFeaturesGPU, Nominal) {
 
     matcher->MatchGuided(kMaxError, image1, image2, &two_view_geometry);
     ExpectReversedInlierMatches(two_view_geometry);
+
+    (*keypoints1)[0].x = 100;
+    matcher->MatchGuided(kMaxError, image1, image2, &two_view_geometry);
+    ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+    EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+    EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
+    (*keypoints1)[0].x = 1;
 
     matcher->MatchGuided(
         kMaxError, image1_updated_keypoints, image2, &two_view_geometry);
@@ -1193,6 +1269,47 @@ TEST(MatchGuidedSiftFeaturesGPU, EssentialMatrix) {
           options.max_num_matches = 1000;
           return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
         });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, RefreshesInPlaceCameraMutation) {
+  RunGpuTest([] {
+    Camera camera1 = Camera::CreateFromModelId(
+        1, CameraModelId::kSimplePinhole, 100.0, 200, 200);
+    Camera camera2 = camera1;
+    camera2.camera_id = 2;
+    const auto descriptors1 =
+        std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2));
+    const FeatureMatcher::Image image1 = {
+        /*image_id=*/1,
+        /*camera=*/&camera1,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{80, 100}, {120, 100}}),
+        descriptors1};
+    const FeatureMatcher::Image image2 = {
+        /*image_id=*/2,
+        /*camera=*/&camera2,
+        std::make_shared<FeatureKeypoints>(
+            std::vector<FeatureKeypoint>{{120, 100}, {80, 100}}),
+        std::make_shared<FeatureDescriptors>(
+            CreateReversedDescriptors(*descriptors1))};
+
+    FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+    options.use_gpu = true;
+    options.max_num_matches = 1000;
+    auto matcher = THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+
+    TwoViewGeometry geometry;
+    geometry.config = TwoViewGeometry::CALIBRATED;
+    geometry.E = EssentialMatrixFromPose(
+        Rigid3d(Eigen::Quaterniond::Identity(), Eigen::Vector3d(1, 0, 0)));
+
+    matcher->MatchGuided(1.0, image1, image2, &geometry);
+    ExpectReversedInlierMatches(geometry);
+
+    camera1.SetPrincipalPointY(0.0);
+    matcher->MatchGuided(1.0, image1, image2, &geometry);
+    EXPECT_TRUE(geometry.inlier_matches.empty());
   });
 }
 

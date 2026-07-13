@@ -23,7 +23,6 @@ jobs:
       matrix:
         config: [
           {os: ubuntu-24.04, cudaEnabled: false},
-          {os: macos-14, arch: arm64, deploymentTarget: 14.0, cudaEnabled: false},
           {os: windows-2025, cudaEnabled: false},
           {os: ubuntu-24.04, cudaEnabled: true},
         ]
@@ -34,9 +33,8 @@ jobs:
       CCACHE_BASEDIR: ${{ github.workspace }}
       FETCHCONTENT_CACHE_VERSION: 1
       FETCHCONTENT_CACHE_DIR: ${{ github.workspace }}/fetchcontent-cache
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.config.deploymentTarget }}
       # For faster builds in PRs, skip all but the oldest Python versions.
-      PULL_REQUEST_CIBW_BUILD: cp311-{macosx,manylinux,win}*
+      PULL_REQUEST_CIBW_BUILD: cp311-{manylinux,win}*
     steps:
       - name: Free disk space
         if: runner.os == 'Linux' && matrix.config.cudaEnabled

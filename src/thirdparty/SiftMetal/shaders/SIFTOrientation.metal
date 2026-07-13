@@ -13,7 +13,7 @@
 using namespace metal;
 
 
-float orientationFromBin(float bin) {
+static float orientationFromBin(float bin) {
     const int n = SIFT_ORIENTATION_HISTOGRAM_BINS;
     float t = bin / (float)n;
     float tau = 2 * M_PI_F;
@@ -28,28 +28,28 @@ float orientationFromBin(float bin) {
 }
 
 
-float interpolatePeak(float h1, float h2, float h3) {
+static float interpolatePeak(float h1, float h2, float h3) {
     return (h1 - h3) / (2 * (h1 + h3 - 2 * h2));
 }
-    
-    
-void getPrincipalOrientations(
-    thread float * histogram,
+
+
+static void getPrincipalOrientations(
+    threadgroup float * histogram,
     float orientationThreshold,
     thread int & orientationsCount,
-    thread float * orientations
+    device float * orientations
 ) {
     const int bins = SIFT_ORIENTATION_HISTOGRAM_BINS;
-    
+
     float maximum = INT_MIN;
     for (int i = 0; i < bins; i++) {
         maximum = max(maximum, histogram[i]);
     }
-    
+
     const float threshold = orientationThreshold * maximum;
-    
+
     orientationsCount = 0;
-    
+
     for (int i = 0; i < bins; i++) {
         float hm = histogram[((i - 1) + bins) % bins];
         float h0 = histogram[i];
@@ -66,8 +66,8 @@ void getPrincipalOrientations(
 }
 
 
-void smoothHistogram(
-    thread float * histogram,
+static void smoothHistogram(
+    threadgroup float * histogram,
     int iterations
 ) {
     const int n = SIFT_ORIENTATION_HISTOGRAM_BINS;
@@ -87,92 +87,99 @@ void smoothHistogram(
 }
 
 
-void getOrientationsHistogram(
-    texture2d_array<float, access::read> g,
-    float absoluteX,
-    float absoluteY,
-    int scale,
-    float keypointSigma,
-    float delta,
-    float lambda,
-    thread float * histogram
-) {
-    const int bins = SIFT_ORIENTATION_HISTOGRAM_BINS;
-    int x = round(absoluteX / delta);
-    int y = round(absoluteY / delta);
-    float sigma = keypointSigma / delta;
-
-    float exponentDenominator = 2.0 * lambda * lambda;
-    
-    // Window radius: match SiftGPU's SAMPLE_WF(2.0) * GAUSSIAN_WF(1.5)
-    int r = ceil(2 * lambda * sigma);
-    
-    for (int j = -r; j <= r; j++) {
-        for (int i = -r; i <= r; i++) {
-
-            // Gaussian weighting
-            float u = (float)i / sigma;
-            float v = (float)j / sigma;
-            float r2 = u * u + v * v;
-            float w = exp(-r2 / exponentDenominator);
-
-            // Gradient orientation
-            float2 gradient = g.read(uint2(uint(x + i), uint(y + j)), scale).rg;
-            float orientation = gradient.x;
-            float magnitude = gradient.y;
-            
-            // Add to histogram
-            float t = orientation / (2 * M_PI_F);
-            int bin = round(t * (float)bins);
-            if (bin < 0) {
-                bin += bins;
-            }
-            if (bin >= bins) {
-                bin -= bins;
-            }
-
-            float m = w * magnitude;
-            
-            histogram[bin] += m;
-        }
-    }
-}
-
-
-
+// One threadgroup per keypoint. Threads accumulate disjoint subsets of the
+// sampling window into private slices of threadgroup memory (no atomics),
+// which are then reduced into a shared histogram. This replaces the previous
+// one-thread-per-keypoint design whose per-thread histogram arrays spilled
+// to scratch memory and whose sampling loop ran serially.
 kernel void siftOrientation(
     device SIFTOrientationResult * results [[buffer(0)]],
     device SIFTOrientationKeypoint * keypoints [[buffer(1)]],
-    device SIFTOrientationParameters & parameters [[buffer(2)]],
-    texture2d_array<float, access::read> gradientTextures [[texture(0)]],
-    uint gid [[thread_position_in_grid]]
+    constant SIFTOrientationParameters & parameters [[buffer(2)]],
+    texture2d_array<float, access::read> gaussianTextures [[texture(0)]],
+    uint groupId [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
     const int bins = SIFT_ORIENTATION_HISTOGRAM_BINS;
-    const SIFTOrientationKeypoint keypoint = keypoints[gid];
-    SIFTOrientationResult result;
-    result.keypoint = keypoint.index;
-    
-    float histogram[bins];
-    for (int i = 0; i < bins; i++) {
-        histogram[i] = 0;
+    const int numThreads = SIFT_ORIENTATION_THREADS;
+
+    threadgroup float partials[SIFT_ORIENTATION_THREADS]
+                              [SIFT_ORIENTATION_HISTOGRAM_BINS];
+    threadgroup float histogram[SIFT_ORIENTATION_HISTOGRAM_BINS];
+
+    const SIFTOrientationKeypoint keypoint = keypoints[groupId];
+
+    for (int b = 0; b < bins; b++) {
+        partials[tid][b] = 0;
     }
-    
-    getOrientationsHistogram(
-        gradientTextures,
-        keypoint.absoluteX,
-        keypoint.absoluteY,
-        keypoint.scale,
-        keypoint.sigma,
-        parameters.delta,
-        parameters.lambda,
-        histogram
-    );
+
+    const int x = round(keypoint.absoluteX / parameters.delta);
+    const int y = round(keypoint.absoluteY / parameters.delta);
+    const float sigma = keypoint.sigma / parameters.delta;
+    const float lambda = parameters.lambda;
+    const float exponentDenominator = 2.0 * lambda * lambda;
+
+    // Window radius: match SiftGPU's SAMPLE_WF(2.0) * GAUSSIAN_WF(1.5)
+    const int r = ceil(2 * lambda * sigma);
+    const int side = 2 * r + 1;
+    const int sampleCount = side * side;
+
+    for (int idx = int(tid); idx < sampleCount; idx += numThreads) {
+        const int i = (idx % side) - r;
+        const int j = (idx / side) - r;
+
+        // Gaussian weighting
+        float u = (float)i / sigma;
+        float v = (float)j / sigma;
+        float r2 = u * u + v * v;
+        float w = exp(-r2 / exponentDenominator);
+
+        // Gradient orientation, computed on the fly from the
+        // Gaussian scale-space image.
+        float2 gradient = siftGradientAt(
+            gaussianTextures, x + i, y + j, uint(keypoint.scale));
+        float orientation = gradient.x;
+        float magnitude = gradient.y;
+
+        // Add to histogram
+        float t = orientation / (2 * M_PI_F);
+        int bin = round(t * (float)bins);
+        if (bin < 0) {
+            bin += bins;
+        }
+        if (bin >= bins) {
+            bin -= bins;
+        }
+
+        partials[tid][bin] += w * magnitude;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Reduce the per-thread partials into the shared histogram.
+    for (int b = int(tid); b < bins; b += numThreads) {
+        float sum = 0;
+        for (int t = 0; t < numThreads; t++) {
+            sum += partials[t][b];
+        }
+        histogram[b] = sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Smoothing and peak extraction touch only 36 bins; run them serially.
+    if (tid != 0) {
+        return;
+    }
     smoothHistogram(histogram, 2);
+    device SIFTOrientationResult & result = results[groupId];
+    result.keypoint = keypoint.index;
+    int count = 0;
     getPrincipalOrientations(
         histogram,
         parameters.orientationThreshold,
-        result.count,
+        count,
         result.orientations
     );
-    results[gid] = result;
+    result.count = count;
 }

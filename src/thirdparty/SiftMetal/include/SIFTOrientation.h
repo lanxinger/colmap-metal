@@ -10,6 +10,8 @@
 #define SIFTOrientation_h
 
 #define SIFT_ORIENTATION_HISTOGRAM_BINS 36
+// Threads per keypoint threadgroup in the siftOrientation kernel.
+#define SIFT_ORIENTATION_THREADS 32
 
 struct SIFTOrientationParameters {
     float delta;

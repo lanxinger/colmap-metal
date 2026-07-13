@@ -179,9 +179,9 @@ AutomaticReconstructionController::AutomaticReconstructionController(
 
   option_manager_.feature_extraction->use_gpu = options_.use_gpu;
   option_manager_.feature_matching->use_gpu = options_.use_gpu;
-  UseGpuCompatibleSiftExtractionOptions(option_manager_.feature_extraction.get());
-  const bool use_gpu_bundle_adjustment =
-      UseCudaGpuBackend(options_.use_gpu);
+  UseGpuCompatibleSiftExtractionOptions(
+      option_manager_.feature_extraction.get());
+  const bool use_gpu_bundle_adjustment = UseCudaGpuBackend(options_.use_gpu);
   option_manager_.mapper->ba_use_gpu = use_gpu_bundle_adjustment;
   option_manager_.mapper->ba_local_backend = options_.ba_backend;
   option_manager_.mapper->ba_global_backend = options_.ba_backend;
@@ -375,8 +375,7 @@ void AutomaticReconstructionController::RunSparseMapper() {
           UseCudaGpuBackend(options_.use_gpu);
       global_options.mapper.global_positioning.use_gpu =
           use_gpu_global_optimization;
-      global_options.mapper.global_positioning.gpu_index =
-          options_.gpu_index;
+      global_options.mapper.global_positioning.gpu_index = options_.gpu_index;
       if (global_options.mapper.bundle_adjustment.ceres) {
         global_options.mapper.bundle_adjustment.ceres->use_gpu =
             use_gpu_global_optimization;

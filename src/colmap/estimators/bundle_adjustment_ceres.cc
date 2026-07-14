@@ -35,6 +35,7 @@
 #include "colmap/estimators/cost_functions/reprojection_error.h"
 #include "colmap/estimators/cost_functions/utils.h"
 #include "colmap/util/cuda.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 #include "colmap/util/timer.h"
@@ -267,7 +268,7 @@ struct FixedGaugeWithThreePoints {
 };
 
 void FixGaugeWithThreePoints(
-    const std::unordered_map<point3D_t, size_t>& point3D_num_observations,
+    const FlatHashMap<point3D_t, size_t>& point3D_num_observations,
     Reconstruction& reconstruction,
     ceres::Problem& problem) {
   FixedGaugeWithThreePoints fixed_gauge;
@@ -308,7 +309,7 @@ void FixGaugeWithTwoCamsFromWorld(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
     const std::set<image_t>& image_ids,
-    const std::unordered_map<point3D_t, size_t>& point3D_num_observations,
+    const FlatHashMap<point3D_t, size_t>& point3D_num_observations,
     Reconstruction& reconstruction,
     ceres::Problem& problem) {
   // No need to fix the Gauge if all frames are constant.
@@ -472,9 +473,9 @@ void ParameterizeRigsAndFrames(const BundleAdjustmentOptions& options,
                                const std::set<image_t>& image_ids,
                                Reconstruction& reconstruction,
                                ceres::Problem& problem) {
-  std::unordered_set<rig_t> parameterized_rig_ids;
-  std::unordered_set<sensor_t> parameterized_sensor_ids;
-  std::unordered_set<frame_t> parameterized_frame_ids;
+  FlatHashSet<rig_t> parameterized_rig_ids;
+  FlatHashSet<sensor_t> parameterized_sensor_ids;
+  FlatHashSet<frame_t> parameterized_frame_ids;
   for (const image_t image_id : image_ids) {
     Image& image = reconstruction.Image(image_id);
     parameterized_rig_ids.insert(image.FramePtr()->RigId());
@@ -545,7 +546,7 @@ void ParameterizeRigsAndFrames(const BundleAdjustmentOptions& options,
 void ParameterizePoints(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
-    const std::unordered_map<point3D_t, size_t>& point3D_num_observations,
+    const FlatHashMap<point3D_t, size_t>& point3D_num_observations,
     Reconstruction& reconstruction,
     ceres::Problem& problem) {
   for (const auto& [point3D_id, num_observations] : point3D_num_observations) {
@@ -930,7 +931,7 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
 
   std::set<camera_t> parameterized_camera_ids_;
   std::set<image_t> parameterized_image_ids_;
-  std::unordered_map<point3D_t, size_t> point3D_num_observations_;
+  FlatHashMap<point3D_t, size_t> point3D_num_observations_;
   double problem_setup_time_in_seconds_ = 0.0;
 };
 

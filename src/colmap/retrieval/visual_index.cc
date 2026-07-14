@@ -33,6 +33,7 @@
 #include "colmap/retrieval/vote_and_verify.h"
 #include "colmap/util/eigen_alignment.h"
 #include "colmap/util/file.h"
+#include "colmap/util/hash_containers.h"
 #include "colmap/util/logging.h"
 #include "colmap/util/threading.h"
 
@@ -175,7 +176,7 @@ class FaissVisualIndex : public VisualIndex {
     THROW_CHECK_EQ(descriptors.data.rows(), keypoints.size());
 
     // Extract top-ranked images to verify.
-    std::unordered_set<int> image_ids;
+    FlatHashSet<int> image_ids;
     for (const auto& image_score : *image_scores) {
       image_ids.insert(image_score.image_id);
     }
@@ -186,9 +187,9 @@ class FaissVisualIndex : public VisualIndex {
 
     // Reference our matches (with their lowest distance) for both
     // {query feature => db feature} and vice versa.
-    std::unordered_map<int, std::unordered_map<int, OrderedMatchListType>>
+    NodeHashMap<int, NodeHashMap<int, OrderedMatchListType>>
         query_to_db_matches;
-    std::unordered_map<int, std::unordered_map<int, OrderedMatchListType>>
+    NodeHashMap<int, NodeHashMap<int, OrderedMatchListType>>
         db_to_query_matches;
 
     std::vector<const EntryType*> word_matches;
@@ -212,9 +213,7 @@ class FaissVisualIndex : public VisualIndex {
 
       // For each db feature, keep track of the lowest distance (if db features
       // are mapped to more than one visual word).
-      std::unordered_map<
-          int,
-          std::unordered_map<int, std::pair<float, const EntryType*>>>
+      NodeHashMap<int, NodeHashMap<int, std::pair<float, const EntryType*>>>
           image_matches;
 
       for (int j = 0; j < word_ids.cols(); ++j) {
@@ -284,10 +283,9 @@ class FaissVisualIndex : public VisualIndex {
           boost::heap::fibonacci_heap<std::pair<int, int>>;
       FibonacciHeapType query_heap;
       FibonacciHeapType db_heap;
-      std::unordered_map<int, typename FibonacciHeapType::handle_type>
+      NodeHashMap<int, typename FibonacciHeapType::handle_type>
           query_heap_handles;
-      std::unordered_map<int, typename FibonacciHeapType::handle_type>
-          db_heap_handles;
+      NodeHashMap<int, typename FibonacciHeapType::handle_type> db_heap_handles;
 
       for (auto& match_data : query_matches) {
         std::sort(
@@ -646,7 +644,7 @@ class FaissVisualIndex : public VisualIndex {
   InvertedIndexType inverted_index_;
 
   // Identifiers of all indexed images.
-  std::unordered_set<int> image_ids_;
+  FlatHashSet<int> image_ids_;
 
   // Whether the index is prepared.
   bool prepared_;

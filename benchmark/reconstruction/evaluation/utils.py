@@ -341,6 +341,14 @@ def parse_args() -> argparse.Namespace:
         "--overwrite_matches", default=False, action="store_true"
     )
     parser.add_argument(
+        "--overwrite_two_view_geometries",
+        default=False,
+        action="store_true",
+        help="Clear two-view geometries (inlier matches) but keep raw matches, "
+        "so geometric verification is recomputed from the cached matches. "
+        "Useful for re-tuning geometric verification without re-matching.",
+    )
+    parser.add_argument(
         "--overwrite_reconstruction", default=False, action="store_true"
     )
     parser.add_argument(
@@ -399,8 +407,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--filter_covisibility",
         default=True,
-        action="store_true",
-        help="Filter out non-covisible image pairs based on GT camera poses.",
+        action=argparse.BooleanOptionalAction,
+        help="Filter out non-covisible image pairs based on GT camera poses. "
+        "Use --no-filter_covisibility to disable.",
     )
     parser.add_argument(
         "--covisibility_frustum_near",
@@ -476,6 +485,11 @@ def parse_args() -> argparse.Namespace:
             "Overwriting matches also overwrites reconstruction"
         )
         args.overwrite_reconstruction = True
+    if args.overwrite_two_view_geometries:
+        pycolmap.logging.info(
+            "Overwriting two-view geometries also overwrites reconstruction"
+        )
+        args.overwrite_reconstruction = True
     if args.overwrite_reconstruction:
         pycolmap.logging.info(
             "Overwriting reconstruction also overwrites alignment"
@@ -538,7 +552,15 @@ def colmap_reconstruction(
         pycolmap.logging.info("Skipping reconstruction, as it already exists")
         return
 
+    # Clearing matches also clears two-view geometries, so there is no need to
+    # clear the latter separately when both flags are set.
     if args.overwrite_matches:
+        cleaner_type = "matches"
+    elif args.overwrite_two_view_geometries:
+        cleaner_type = "two_view_geometries"
+    else:
+        cleaner_type = None
+    if cleaner_type is not None:
         subprocess.check_call(
             [
                 args.colmap_path,
@@ -546,7 +568,7 @@ def colmap_reconstruction(
                 "--database_path",
                 database_path,
                 "--type",
-                "matches",
+                cleaner_type,
             ],
             cwd=workspace_path,
             preexec_fn=_set_pdeathsig,

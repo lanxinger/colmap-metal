@@ -35,7 +35,7 @@ jobs:
       - name: Check code format
         run: |
           python3 -m venv .ci-format
-          .ci-format/bin/pip install ruff==0.15.7 clang-format==22.1.1
+          .ci-format/bin/pip install ruff==0.15.20 clang-format==22.1.5
           PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/c++.sh --all
           PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/python.sh --all
           git diff --name-only

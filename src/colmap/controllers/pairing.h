@@ -90,6 +90,10 @@ struct SequentialPairingOptions {
   // Whether to match images against their quadratic neighbors.
   bool quadratic_overlap = true;
 
+  // Whether to sort images by their leaf filename instead of their full path.
+  // The full path is used to break ties between equal leaf filenames.
+  bool order_by_leaf_filename = false;
+
   // Whether to match an image against all images within the same rig frame
   // and all images in neighboring rig frames. Note that this assumes that
   // images are appropriate named according to the following scheme:

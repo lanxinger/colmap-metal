@@ -332,8 +332,11 @@ matching modes, which are intended for different input scenarios:
   (``--SequentialMatching.loop_detection_num_images``). Note that image
   file names must be ordered sequentially (e.g., ``image0001.jpg``,
   ``image0002.jpg``, etc.). The order in the database is not relevant, since the
-  images are explicitly ordered according to their file names. Note that loop
-  detection requires a pre-trained vocabulary tree. A default tree will be
+  images are explicitly ordered according to their file names. By default, the
+  full relative path is used. For capture sequences split across camera
+  sub-folders, ``--SequentialMatching.order_by_leaf_filename 1`` instead uses
+  the leaf filename, which must then be globally and lexically ordered. Note that
+  loop detection requires a pre-trained vocabulary tree. A default tree will be
   automatically downloaded and cached. More trees are available and can be
   downloaded from https://demuc.de/colmap/. In case rigs and frames are
   configured appropriately in the database, sequential matching will

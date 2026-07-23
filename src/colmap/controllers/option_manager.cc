@@ -455,6 +455,8 @@ void OptionManager::AddSequentialPairingOptions() {
   AddDefaultOption("SequentialMatching.overlap", &sequential_pairing->overlap);
   AddDefaultOption("SequentialMatching.quadratic_overlap",
                    &sequential_pairing->quadratic_overlap);
+  AddDefaultOption("SequentialMatching.order_by_leaf_filename",
+                   &sequential_pairing->order_by_leaf_filename);
   AddDefaultOption("SequentialMatching.expand_rig_images",
                    &sequential_pairing->expand_rig_images);
   AddDefaultOption("SequentialMatching.loop_detection",

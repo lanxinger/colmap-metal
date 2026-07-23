@@ -89,6 +89,8 @@ std::unique_ptr<Thread> CreateVocabTreeFeatureMatcher(
 //                    image_[i - 2^o, i + 2^o]    (for quadratic overlap)
 //
 // Sequential order is determined based on the image names in ascending order.
+// Optionally, only the leaf filename is used so that camera sub-folders do not
+// group otherwise interleaved capture sequences.
 //
 // Invoke loop detection if `(i mod loop_detection_period) == 0`, retrieve
 // most similar `loop_detection_num_images` images from vocabulary tree,

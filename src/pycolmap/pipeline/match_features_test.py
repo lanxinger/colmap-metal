@@ -80,6 +80,13 @@ def test_sequential_pairing_options_quadratic_overlap():
     assert options.quadratic_overlap is True
 
 
+def test_sequential_pairing_options_order_by_leaf_filename():
+    options = pycolmap.SequentialPairingOptions()
+    assert options.order_by_leaf_filename is False
+    options.order_by_leaf_filename = True
+    assert options.order_by_leaf_filename is True
+
+
 def test_sequential_pairing_options_vocab_tree_options():
     options = pycolmap.SequentialPairingOptions()
     vocab_tree_options = options.vocab_tree_options()

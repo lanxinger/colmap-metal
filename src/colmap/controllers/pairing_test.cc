@@ -194,6 +194,83 @@ TEST(SequentialPairGenerator, Linear) {
   EXPECT_TRUE(generator.HasFinished());
 }
 
+TEST(SequentialPairGenerator, OrderByLeafFilename) {
+  constexpr int kNumImages = 4;
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(kNumImages, *database);
+  std::vector<Image> images = database->ReadAllImages();
+  CHECK_EQ(images.size(), kNumImages);
+
+  const std::vector<std::string> image_names = {
+      "camera_a/00000000_frame.jpg",
+      "camera_a/00000002_frame.jpg",
+      "camera_b/00000001_frame.jpg",
+      "camera_b/00000003_frame.jpg",
+  };
+  for (size_t i = 0; i < images.size(); ++i) {
+    images[i].SetName(image_names[i]);
+    database->UpdateImage(images[i]);
+  }
+
+  SequentialPairingOptions options;
+  options.overlap = 1;
+  options.quadratic_overlap = false;
+  options.expand_rig_images = false;
+
+  SequentialPairGenerator full_path_generator(options, database);
+  EXPECT_THAT(full_path_generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[0].ImageId(), images[1].ImageId())));
+
+  options.order_by_leaf_filename = true;
+  SequentialPairGenerator leaf_name_generator(options, database);
+  EXPECT_THAT(leaf_name_generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[0].ImageId(), images[2].ImageId())));
+  EXPECT_THAT(leaf_name_generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[2].ImageId(), images[1].ImageId())));
+  EXPECT_THAT(leaf_name_generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[1].ImageId(), images[3].ImageId())));
+  EXPECT_TRUE(leaf_name_generator.Next().empty());
+  EXPECT_TRUE(leaf_name_generator.HasFinished());
+}
+
+TEST(SequentialPairGenerator, OrderByLeafFilenameBreaksTiesByFullPath) {
+  constexpr int kNumImages = 3;
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  CreateSyntheticDatabase(kNumImages, *database);
+  std::vector<Image> images = database->ReadAllImages();
+  CHECK_EQ(images.size(), kNumImages);
+
+  const std::vector<std::string> image_names = {
+      "camera_b/00000000_frame.jpg",
+      "camera_a/00000000_frame.jpg",
+      "camera_a/00000001_frame.jpg",
+  };
+  for (size_t i = 0; i < images.size(); ++i) {
+    images[i].SetName(image_names[i]);
+    database->UpdateImage(images[i]);
+  }
+
+  SequentialPairingOptions options;
+  options.overlap = 1;
+  options.quadratic_overlap = false;
+  options.order_by_leaf_filename = true;
+  options.expand_rig_images = false;
+
+  SequentialPairGenerator generator(options, database);
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[1].ImageId(), images[0].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[0].ImageId(), images[2].ImageId())));
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.HasFinished());
+}
+
 TEST(SequentialPairGenerator, LinearRig) {
   auto database = Database::Open(kInMemorySqliteDatabasePath);
   Reconstruction unused_reconstruction;

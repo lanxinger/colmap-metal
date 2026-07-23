@@ -175,6 +175,11 @@ void BindMatchFeatures(py::module& m) {
               "quadratic_overlap",
               &SequentialPairingOptions::quadratic_overlap,
               "Whether to match images against their quadratic neighbors.")
+          .def_readwrite(
+              "order_by_leaf_filename",
+              &SequentialPairingOptions::order_by_leaf_filename,
+              "Whether to sort images by their leaf filename instead of their "
+              "full path.")
           .def_readwrite("expand_rig_images",
                          &SequentialPairingOptions::expand_rig_images,
                          "Whether to match an image against all images in "

@@ -551,7 +551,16 @@ std::vector<image_t> SequentialPairGenerator::GetOrderedImageIds() const {
 
   std::sort(ordered_images.begin(),
             ordered_images.end(),
-            [](const Image& image1, const Image& image2) {
+            [this](const Image& image1, const Image& image2) {
+              if (options_.order_by_leaf_filename) {
+                const std::string leaf_name1 =
+                    GetPathBaseName(image1.Name()).string();
+                const std::string leaf_name2 =
+                    GetPathBaseName(image2.Name()).string();
+                if (leaf_name1 != leaf_name2) {
+                  return leaf_name1 < leaf_name2;
+                }
+              }
               return image1.Name() < image2.Name();
             });
 

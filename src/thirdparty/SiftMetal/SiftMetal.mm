@@ -62,8 +62,8 @@ static std::vector<float> GaussianWeights(float sigma) {
 struct Octave {
   int o = 0;                 // octave index
   float delta = 0.0f;        // sampling distance
-  // Logical dimensions of the current image at this octave. Textures are
-  // allocated once for the maximum image size and reused across images.
+  // Logical dimensions of the current image at this octave. Textures grow
+  // monotonically as needed and are reused across images.
   int width = 0, height = 0;
   int num_scales = 0;        // scales per octave (typically 3)
   std::vector<float> sigmas;  // sigma values for each gaussian
@@ -139,11 +139,12 @@ static bool OctavesResourcesReady(const std::vector<Octave>& octaves) {
 // ---------------------------------------------------------------------------
 class SiftMetalExtractorImpl {
  public:
-  bool Init(const Options& opts, int max_w, int max_h);
+  bool Init(const Options& opts, int initial_w, int initial_h);
   bool Extract(const uint8_t* data, int w, int h, ExtractResult* result);
 
  private:
   void SetupOctaves(int w, int h);
+  void ResetSizeDependentResources();
   // Updates logical dimensions and shader parameters for a new image size
   // without reallocating textures. Requires w <= alloc_w_ and h <= alloc_h_.
   void ConfigureForSize(int w, int h);
@@ -796,8 +797,10 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
-  if (max_w <= 0 || max_h <= 0 ||
+bool SiftMetalExtractorImpl::Init(const Options& opts,
+                                  int initial_w,
+                                  int initial_h) {
+  if (initial_w <= 0 || initial_h <= 0 ||
       (opts.first_octave != -1 && opts.first_octave != 0) ||
       opts.scales_per_octave <= 0 || opts.max_num_features <= 0 ||
       !std::isfinite(opts.peak_threshold) || opts.peak_threshold <= 0.0f ||
@@ -890,16 +893,16 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
     delta_min_ = 1.0f;
   }
 
-  input_w_ = max_w;
-  input_h_ = max_h;
-  alloc_w_ = max_w;
-  alloc_h_ = max_h;
-  seed_w_ = static_cast<int>(float(max_w) / delta_min_);
-  seed_h_ = static_cast<int>(float(max_h) / delta_min_);
+  input_w_ = initial_w;
+  input_h_ = initial_h;
+  alloc_w_ = initial_w;
+  alloc_h_ = initial_h;
+  seed_w_ = static_cast<int>(float(initial_w) / delta_min_);
+  seed_h_ = static_cast<int>(float(initial_h) / delta_min_);
 
   // Create textures for the seed stage. The grayscale input is uploaded
   // directly as R8Unorm; texture reads return the pixel value / 255.
-  luminosityTexture_ = MakeTexture2D(device_, max_w, max_h,
+  luminosityTexture_ = MakeTexture2D(device_, initial_w, initial_h,
                                       MTLPixelFormatR8Unorm,
                                       MTLStorageModeShared);
   scaledTexture_ = MakeTexture2D(device_, seed_w_, seed_h_,
@@ -935,13 +938,13 @@ bool SiftMetalExtractorImpl::Init(const Options& opts, int max_w, int max_h) {
     return false;
   }
 
-  // Setup octaves at the maximum (allocated) size, then configure the
+  // Setup octaves at the initial allocated size, then configure the
   // logical size, which starts out equal to the allocation.
-  SetupOctaves(max_w, max_h);
+  SetupOctaves(initial_w, initial_h);
   if (!OctavesResourcesReady(octaves_)) {
     return false;
   }
-  ConfigureForSize(max_w, max_h);
+  ConfigureForSize(initial_w, initial_h);
 
   return true;
 }
@@ -990,6 +993,21 @@ void SiftMetalExtractorImpl::SetupOctaves(int w, int h) {
     octaves_.emplace_back();
     SetupOctave(octaves_.back(), o, delta, ow, oh, ns, sigmas);
   }
+}
+
+void SiftMetalExtractorImpl::ResetSizeDependentResources() {
+  luminosityTexture_ = nil;
+  scaledTexture_ = nil;
+  seedTexture_ = nil;
+  seedConvWorkTexture_ = nil;
+  octaves_.clear();
+  input_w_ = 0;
+  input_h_ = 0;
+  seed_w_ = 0;
+  seed_h_ = 0;
+  alloc_w_ = 0;
+  alloc_h_ = 0;
+  num_active_octaves_ = 0;
 }
 
 void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
@@ -1211,9 +1229,8 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     return false;
   }
 
-  // Reconfigure for a changed image size. Textures are only reallocated if
-  // the image exceeds the current allocation, which normal usage never hits
-  // because Init sizes everything for the maximum image dimension.
+  // Reconfigure for a changed image size. Textures grow monotonically along
+  // each axis only when the image exceeds the current allocation.
   if (w != input_w_ || h != input_h_) {
     if (w > alloc_w_ || h > alloc_h_) {
       alloc_w_ = std::max(w, alloc_w_);
@@ -1236,11 +1253,13 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
                                             MTLStorageModePrivate);
       if (!luminosityTexture_ || !scaledTexture_ || !seedTexture_ ||
           !seedConvWorkTexture_) {
+        ResetSizeDependentResources();
         return false;
       }
 
       SetupOctaves(alloc_w_, alloc_h_);
       if (!OctavesResourcesReady(octaves_)) {
+        ResetSizeDependentResources();
         return false;
       }
     }
@@ -1875,8 +1894,10 @@ SiftMetalExtractor::SiftMetalExtractor()
 
 SiftMetalExtractor::~SiftMetalExtractor() = default;
 
-bool SiftMetalExtractor::Init(const Options& options, int max_w, int max_h) {
-  return impl_->Init(options, max_w, max_h);
+bool SiftMetalExtractor::Init(const Options& options,
+                              int initial_w,
+                              int initial_h) {
+  return impl_->Init(options, initial_w, initial_h);
 }
 
 bool SiftMetalExtractor::Extract(const uint8_t* data, int w, int h,

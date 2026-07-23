@@ -133,6 +133,13 @@ kernel void siftDescriptors(
                 continue;
             }
 
+            // Gather: this cell's share of the bilinear scatter.
+            const float wx = 1.0f - abs(bx - (float)cellX);
+            const float wy = 1.0f - abs(by - (float)cellY);
+            if (wx <= 0.0f || wy <= 0.0f) {
+                continue;
+            }
+
             float2 g = siftGradientAt(
                 gaussianTextures, sampleX, sampleY, uint(input.scale));
             if (!all(isfinite(g)) || g.g <= 0.0f) {
@@ -158,13 +165,6 @@ kernel void siftDescriptors(
             float w = exp(-exponentNumerator / exponentDenominator);
             float value = magnitude * w;
             if (!isfinite(value) || value <= 0.0f) {
-                continue;
-            }
-
-            // Gather: this cell's share of the bilinear scatter.
-            const float wx = 1.0f - abs(bx - (float)cellX);
-            const float wy = 1.0f - abs(by - (float)cellY);
-            if (wx <= 0.0f || wy <= 0.0f) {
                 continue;
             }
             const float wxy = wx * wy * value;

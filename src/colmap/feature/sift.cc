@@ -824,8 +824,9 @@ class SiftMetalFeatureExtractor : public FeatureExtractor {
     metal_opts.max_num_orientations = options.sift->max_num_orientations;
     metal_opts.upright = options.sift->upright;
 
-    int max_dim = options.EffMaxImageSize();
-    if (!extractor->extractor_.Init(metal_opts, max_dim, max_dim)) {
+    // Allocate the aspect-aware pyramid lazily from the first image rather
+    // than eagerly reserving a square EffMaxImageSize() pyramid.
+    if (!extractor->extractor_.Init(metal_opts, 1, 1)) {
       LOG(ERROR) << "Failed to initialize Metal SIFT extractor";
       return nullptr;
     }

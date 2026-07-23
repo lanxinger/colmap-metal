@@ -405,26 +405,28 @@ TEST(ExtractSiftFeaturesMetal, ReusesTexturesAcrossMixedImageSizes) {
       CreateImageWithRectangle(193, 257),
       CreateImageWithRectangle(321, 181),
   };
-  sift_metal::Options options;
-  sift_metal::SiftMetalExtractor reused_extractor;
-  ASSERT_TRUE(
-      reused_extractor.Init(options, bitmaps[0].Width(), bitmaps[0].Height()));
+  for (const int first_octave : {-1, 0}) {
+    sift_metal::Options options;
+    options.first_octave = first_octave;
+    sift_metal::SiftMetalExtractor reused_extractor;
+    ASSERT_TRUE(reused_extractor.Init(options, 1, 1));
 
-  for (const Bitmap& bitmap : bitmaps) {
-    sift_metal::ExtractResult reused_result;
-    ASSERT_TRUE(reused_extractor.Extract(bitmap.RowMajorData().data(),
-                                         bitmap.Width(),
-                                         bitmap.Height(),
-                                         &reused_result));
+    for (const Bitmap& bitmap : bitmaps) {
+      sift_metal::ExtractResult reused_result;
+      ASSERT_TRUE(reused_extractor.Extract(bitmap.RowMajorData().data(),
+                                           bitmap.Width(),
+                                           bitmap.Height(),
+                                           &reused_result));
 
-    sift_metal::SiftMetalExtractor fresh_extractor;
-    ASSERT_TRUE(fresh_extractor.Init(options, bitmap.Width(), bitmap.Height()));
-    sift_metal::ExtractResult fresh_result;
-    ASSERT_TRUE(fresh_extractor.Extract(bitmap.RowMajorData().data(),
-                                        bitmap.Width(),
-                                        bitmap.Height(),
-                                        &fresh_result));
-    ExpectEquivalentMetalExtraction(reused_result, fresh_result);
+      sift_metal::SiftMetalExtractor fresh_extractor;
+      ASSERT_TRUE(fresh_extractor.Init(options, bitmap.Width(), bitmap.Height()));
+      sift_metal::ExtractResult fresh_result;
+      ASSERT_TRUE(fresh_extractor.Extract(bitmap.RowMajorData().data(),
+                                          bitmap.Width(),
+                                          bitmap.Height(),
+                                          &fresh_result));
+      ExpectEquivalentMetalExtraction(reused_result, fresh_result);
+    }
   }
 }
 

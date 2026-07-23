@@ -75,8 +75,11 @@ class SiftMetalExtractor {
   SiftMetalExtractor();
   ~SiftMetalExtractor();
 
-  // Initialize the Metal pipeline. Returns false if Metal is unavailable.
-  bool Init(const Options& options, int max_image_width, int max_image_height);
+  // Initialize the Metal pipeline and its initial texture allocation. Resources
+  // grow on demand when Extract receives a larger image.
+  bool Init(const Options& options,
+            int initial_image_width,
+            int initial_image_height);
 
   // Extract SIFT features from a grayscale image.
   // data: row-major uint8 grayscale pixels

@@ -419,7 +419,8 @@ TEST(ExtractSiftFeaturesMetal, ReusesTexturesAcrossMixedImageSizes) {
                                            &reused_result));
 
       sift_metal::SiftMetalExtractor fresh_extractor;
-      ASSERT_TRUE(fresh_extractor.Init(options, bitmap.Width(), bitmap.Height()));
+      ASSERT_TRUE(
+          fresh_extractor.Init(options, bitmap.Width(), bitmap.Height()));
       sift_metal::ExtractResult fresh_result;
       ASSERT_TRUE(fresh_extractor.Extract(bitmap.RowMajorData().data(),
                                           bitmap.Width(),

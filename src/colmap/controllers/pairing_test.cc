@@ -271,6 +271,66 @@ TEST(SequentialPairGenerator, OrderByLeafFilenameBreaksTiesByFullPath) {
   EXPECT_TRUE(generator.HasFinished());
 }
 
+TEST(SequentialPairGenerator, OrderByLeafFilenameRigAvoidsCrossSensorPairs) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction unused_reconstruction;
+  SyntheticDatasetOptions synthetic_dataset_options;
+  synthetic_dataset_options.num_rigs = 1;
+  synthetic_dataset_options.num_cameras_per_rig = 2;
+  synthetic_dataset_options.num_frames_per_rig = 3;
+  SynthesizeDataset(
+      synthetic_dataset_options, &unused_reconstruction, database.get());
+  std::vector<Image> images = database->ReadAllImages();
+
+  const std::vector<std::string> image_names = {
+      "camera_a/00000000_frame.jpg",
+      "camera_b/00000000_frame.jpg",
+      "camera_a/00000001_frame.jpg",
+      "camera_b/00000001_frame.jpg",
+      "camera_a/00000002_frame.jpg",
+      "camera_b/00000002_frame.jpg",
+  };
+  CHECK_EQ(images.size(), image_names.size());
+  for (size_t i = 0; i < images.size(); ++i) {
+    images[i].SetName(image_names[i]);
+    database->UpdateImage(images[i]);
+  }
+
+  SequentialPairingOptions options;
+  options.overlap = 2;
+  options.quadratic_overlap = false;
+  options.order_by_leaf_filename = true;
+  SequentialPairGenerator generator(options, database);
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[0].ImageId(), images[1].ImageId()),
+                  std::make_pair(images[0].ImageId(), images[2].ImageId()),
+                  std::make_pair(images[0].ImageId(), images[3].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[1].ImageId(), images[0].ImageId()),
+                  std::make_pair(images[1].ImageId(), images[3].ImageId()),
+                  std::make_pair(images[1].ImageId(), images[2].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[2].ImageId(), images[3].ImageId()),
+                  std::make_pair(images[2].ImageId(), images[4].ImageId()),
+                  std::make_pair(images[2].ImageId(), images[5].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[3].ImageId(), images[2].ImageId()),
+                  std::make_pair(images[3].ImageId(), images[5].ImageId()),
+                  std::make_pair(images[3].ImageId(), images[4].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[4].ImageId(), images[5].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[5].ImageId(), images[4].ImageId())));
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.HasFinished());
+}
+
 TEST(SequentialPairGenerator, LinearRig) {
   auto database = Database::Open(kInMemorySqliteDatabasePath);
   Reconstruction unused_reconstruction;
@@ -301,14 +361,61 @@ TEST(SequentialPairGenerator, LinearRig) {
                   std::make_pair(images[2].ImageId(), images[5].ImageId())));
   EXPECT_THAT(generator.Next(),
               testing::ElementsAre(
-                  std::make_pair(images[4].ImageId(), images[5].ImageId()),
-                  std::make_pair(images[4].ImageId(), images[1].ImageId()),
-                  std::make_pair(images[4].ImageId(), images[0].ImageId())));
+                  std::make_pair(images[4].ImageId(), images[5].ImageId())));
   EXPECT_THAT(generator.Next(),
               testing::ElementsAre(
                   std::make_pair(images[1].ImageId(), images[0].ImageId()),
                   std::make_pair(images[1].ImageId(), images[3].ImageId()),
                   std::make_pair(images[1].ImageId(), images[2].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[3].ImageId(), images[2].ImageId()),
+                  std::make_pair(images[3].ImageId(), images[5].ImageId()),
+                  std::make_pair(images[3].ImageId(), images[4].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[5].ImageId(), images[4].ImageId())));
+  EXPECT_TRUE(generator.Next().empty());
+  EXPECT_TRUE(generator.HasFinished());
+}
+
+TEST(SequentialPairGenerator, QuadraticRig) {
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction unused_reconstruction;
+  SyntheticDatasetOptions synthetic_dataset_options;
+  synthetic_dataset_options.num_rigs = 1;
+  synthetic_dataset_options.num_cameras_per_rig = 2;
+  synthetic_dataset_options.num_frames_per_rig = 3;
+  SynthesizeDataset(
+      synthetic_dataset_options, &unused_reconstruction, database.get());
+  const std::vector<Image> images = database->ReadAllImages();
+
+  SequentialPairingOptions options;
+  options.overlap = 3;
+  options.quadratic_overlap = true;
+  SequentialPairGenerator generator(options, database);
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[0].ImageId(), images[1].ImageId()),
+                  std::make_pair(images[0].ImageId(), images[2].ImageId()),
+                  std::make_pair(images[0].ImageId(), images[3].ImageId()),
+                  std::make_pair(images[0].ImageId(), images[4].ImageId()),
+                  std::make_pair(images[0].ImageId(), images[5].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[2].ImageId(), images[3].ImageId()),
+                  std::make_pair(images[2].ImageId(), images[4].ImageId()),
+                  std::make_pair(images[2].ImageId(), images[5].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[4].ImageId(), images[5].ImageId())));
+  EXPECT_THAT(generator.Next(),
+              testing::ElementsAre(
+                  std::make_pair(images[1].ImageId(), images[0].ImageId()),
+                  std::make_pair(images[1].ImageId(), images[3].ImageId()),
+                  std::make_pair(images[1].ImageId(), images[2].ImageId()),
+                  std::make_pair(images[1].ImageId(), images[5].ImageId()),
+                  std::make_pair(images[1].ImageId(), images[4].ImageId())));
   EXPECT_THAT(generator.Next(),
               testing::ElementsAre(
                   std::make_pair(images[3].ImageId(), images[2].ImageId()),

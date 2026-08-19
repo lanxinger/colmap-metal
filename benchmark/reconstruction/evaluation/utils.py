@@ -386,7 +386,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--feature",
         default="sift",
-        choices=["sift", "aliked"],
+        choices=["sift", "aliked", "loma", "loma128"],
     )
     parser.add_argument(
         "--mapper",

@@ -33,9 +33,12 @@
 #include "colmap/util/misc.h"
 #include "colmap/util/threading.h"
 
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
+
 #ifdef _WIN32
 #include <Windows.h>
 #endif
@@ -48,6 +51,35 @@ namespace colmap {
 #ifdef COLMAP_ONNX_ENABLED
 
 namespace {
+constexpr char kDisableCpuEpFallback[] = "session.disable_cpu_ep_fallback";
+
+#ifdef COLMAP_COREML_ENABLED
+std::unordered_map<std::string, std::string> CreateCoreMLProviderOptions(
+    const std::filesystem::path& model_path) {
+  std::unordered_map<std::string, std::string> provider_options = {
+      {kCoremlProviderOption_ModelFormat, "MLProgram"},
+      {kCoremlProviderOption_MLComputeUnits, "ALL"},
+      {kCoremlProviderOption_RequireStaticInputShapes, "1"},
+  };
+
+  // Persist converted CoreML subgraphs beside COLMAP's cached ONNX model. The
+  // downloaded model name contains its SHA256, so replacing a released model
+  // naturally gets a separate cache key. Custom models retain ONNX Runtime's
+  // documented responsibility to invalidate their cache when replaced.
+  const std::filesystem::path cache_dir = model_path.parent_path() / "coreml";
+  std::error_code error;
+  std::filesystem::create_directories(cache_dir, error);
+  if (!error) {
+    provider_options.emplace(kCoremlProviderOption_ModelCacheDirectory,
+                             cache_dir.string());
+  } else {
+    VLOG(1) << "Could not create CoreML model cache at " << cache_dir << ": "
+            << error.message();
+  }
+  return provider_options;
+}
+#endif
+
 [[noreturn]] void RethrowONNXException() {
   try {
     std::rethrow_exception(std::current_exception());
@@ -66,6 +98,19 @@ namespace {
   }
 }
 }  // namespace
+
+ONNXExecutionProvider SelectONNXExecutionProvider(bool use_gpu) {
+  if (!use_gpu) {
+    return ONNXExecutionProvider::CPU;
+  }
+#ifdef COLMAP_CUDA_ENABLED
+  return ONNXExecutionProvider::CUDA;
+#elif defined(COLMAP_COREML_ENABLED)
+  return ONNXExecutionProvider::COREML;
+#else
+  return ONNXExecutionProvider::CPU;
+#endif
+}
 
 std::string FormatONNXTensorShape(const std::vector<int64_t>& shape) {
   std::ostringstream oss;
@@ -102,7 +147,8 @@ void ThrowCheckONNXNode(const std::string_view name,
 ONNXModel::ONNXModel(std::string model_path,
                      int num_threads,
                      bool use_gpu,
-                     const std::string& gpu_index) {
+                     const std::string& gpu_index,
+                     bool is_capability_probe) {
   {
     static std::mutex download_mutex;
     const std::lock_guard<std::mutex> lock(download_mutex);
@@ -112,8 +158,12 @@ ONNXModel::ONNXModel(std::string model_path,
   const int num_eff_threads = GetEffectiveNumThreads(num_threads);
 
   try {
-    InitializeSession(model_path, num_eff_threads, use_gpu, gpu_index);
+    InitializeSession(
+        model_path, num_eff_threads, use_gpu, gpu_index, is_capability_probe);
   } catch (...) {
+    if (is_capability_probe) {
+      throw;
+    }
     RethrowONNXException();
   }
 }
@@ -139,11 +189,19 @@ void ONNXModel::ConfigureSessionOptions(int num_threads) {
 void ONNXModel::InitializeSession(const std::string& model_path,
                                   int num_threads,
                                   bool use_gpu,
-                                  const std::string& gpu_index) {
+                                  const std::string& gpu_index,
+                                  bool is_capability_probe) {
   ConfigureSessionOptions(num_threads);
+  execution_provider_ = SelectONNXExecutionProvider(use_gpu);
+
+  if (is_capability_probe &&
+      execution_provider_ != ONNXExecutionProvider::CPU) {
+    // Fail if any node would fall back to CPU.
+    session_options_.AddConfigEntry(kDisableCpuEpFallback, "1");
+  }
 
 #ifdef COLMAP_CUDA_ENABLED
-  if (use_gpu) {
+  if (execution_provider_ == ONNXExecutionProvider::CUDA) {
     const std::vector<int> gpu_indices = CSVToVector<int>(gpu_index);
     THROW_CHECK_EQ(gpu_indices.size(), 1)
         << "ONNX model can only run on one GPU";
@@ -159,17 +217,16 @@ void ONNXModel::InitializeSession(const std::string& model_path,
   // offloads supported subgraphs to the GPU/Apple Neural Engine (unsupported
   // nodes automatically fall back to the CPU). Selected automatically whenever
   // GPU use is requested; set use_gpu=false to force pure CPU execution.
-  bool use_coreml = false;
+  const bool use_coreml = execution_provider_ == ONNXExecutionProvider::COREML;
 #ifdef COLMAP_COREML_ENABLED
-  if (use_gpu) {
+  if (use_coreml) {
     VLOG(2) << "Enabling CoreML execution provider";
-    // COREML_FLAG_CREATE_MLPROGRAM selects the newer ML Program model format,
-    // which supports a wider set of operators and float inputs than the legacy
-    // NeuralNetwork format.
-    Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CoreML(
-        static_cast<OrtSessionOptions*>(session_options_),
-        COREML_FLAG_CREATE_MLPROGRAM));
-    use_coreml = true;
+    // Restrict CoreML to static subgraphs. LoMa's complete graph has dynamic
+    // inputs, but its static CNN/Transformer partitions can still run through
+    // CoreML while unsupported or dynamic nodes remain on ONNX Runtime's CPU
+    // provider.
+    session_options_.AppendExecutionProvider(
+        "CoreML", CreateCoreMLProviderOptions(model_path));
   }
 #endif
 
@@ -189,7 +246,7 @@ void ONNXModel::InitializeSession(const std::string& model_path,
     session_ =
         std::make_unique<Ort::Session>(env_, model_path_cstr, session_options_);
   } catch (const Ort::Exception& e) {
-    if (!use_coreml) {
+    if (!use_coreml || is_capability_probe) {
       throw;
     }
     // Some models cannot be compiled by CoreML (e.g. unsupported dynamic
@@ -197,6 +254,7 @@ void ONNXModel::InitializeSession(const std::string& model_path,
     LOG(WARNING) << "Failed to initialize ONNX session with CoreML ("
                  << e.what() << "); falling back to CPU execution provider";
     ConfigureSessionOptions(num_threads);
+    execution_provider_ = ONNXExecutionProvider::CPU;
     session_ =
         std::make_unique<Ort::Session>(env_, model_path_cstr, session_options_);
   }

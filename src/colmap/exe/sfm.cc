@@ -116,7 +116,8 @@ int RunAutomaticReconstructor(int argc, char** argv) {
                            &reconstruction_options.guided_matching);
   options.AddDefaultOption("sparse", &reconstruction_options.sparse);
   options.AddDefaultOption("dense", &reconstruction_options.dense);
-  options.AddDefaultOption("feature", &feature, "{sift, aliked}");
+  options.AddDefaultOption(
+      "feature", &feature, "{sift, aliked, loma, loma128}");
   options.AddDefaultOption(
       "mapper", &mapper, "{incremental, hierarchical, global}");
   options.AddDefaultOption("mesher", &mesher, "{poisson, delaunay}");

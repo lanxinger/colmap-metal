@@ -143,6 +143,8 @@ class Bitmap {
   enum class RescaleFilter {
     kBilinear,
     kBox,
+    // OpenImageIO's direction-dependent high-quality default.
+    kHighQuality,
   };
   void Rescale(int new_width,
                int new_height,

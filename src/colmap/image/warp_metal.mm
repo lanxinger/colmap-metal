@@ -323,7 +323,8 @@ class MetalImageWarper {
 
     if (!resize_with_metal && (target_camera.width != source_camera.width ||
                                target_camera.height != source_camera.height)) {
-      result.Rescale(target_camera.width, target_camera.height);
+      result.Rescale(
+          target_camera.width, target_camera.height, Bitmap::RescaleFilter::kHighQuality);
     }
     *target_image = std::move(result);
     return true;

@@ -75,7 +75,9 @@ void WarpImageBetweenCameras(const Camera& source_camera,
     *target_image = source_image.Clone();
     if (target_camera.width != source_camera.width ||
         target_camera.height != source_camera.height) {
-      target_image->Rescale(target_camera.width, target_camera.height);
+      target_image->Rescale(target_camera.width,
+                            target_camera.height,
+                            Bitmap::RescaleFilter::kHighQuality);
     }
     return;
   }
@@ -115,7 +117,9 @@ void WarpImageBetweenCameras(const Camera& source_camera,
 
   if (target_camera.width != source_camera.width ||
       target_camera.height != source_camera.height) {
-    target_image->Rescale(target_camera.width, target_camera.height);
+    target_image->Rescale(target_camera.width,
+                          target_camera.height,
+                          Bitmap::RescaleFilter::kHighQuality);
   }
 }
 
@@ -202,7 +206,9 @@ void WarpImageWithHomographyBetweenCameras(const Eigen::Matrix3d& H,
 
   if (target_camera.width != source_camera.width ||
       target_camera.height != source_camera.height) {
-    target_image->Rescale(target_camera.width, target_camera.height);
+    target_image->Rescale(target_camera.width,
+                          target_camera.height,
+                          Bitmap::RescaleFilter::kHighQuality);
   }
 }
 

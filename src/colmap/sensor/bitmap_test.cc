@@ -401,6 +401,19 @@ TEST(Bitmap, RescaleGrey) {
   EXPECT_EQ(bitmap2.Channels(), 1);
 }
 
+TEST(Bitmap, RescaleFilters) {
+  Bitmap bitmap(4, 4, /*as_rgb=*/false);
+  bitmap.Fill(BitmapColor<uint8_t>(0));
+  bitmap.SetPixel(0, 0, BitmapColor<uint8_t>(255));
+
+  Bitmap bilinear_bitmap = bitmap.Clone();
+  bilinear_bitmap.Rescale(1, 1, Bitmap::RescaleFilter::kBilinear);
+  Bitmap box_bitmap = bitmap.Clone();
+  box_bitmap.Rescale(1, 1, Bitmap::RescaleFilter::kBox);
+
+  EXPECT_NE(bilinear_bitmap.RowMajorData(), box_bitmap.RowMajorData());
+}
+
 TEST(Bitmap, Thumbnail) {
   Bitmap bitmap(100, 80, /*as_rgb=*/true);
 

@@ -142,14 +142,19 @@ DatabaseCache::Options CreateDatabaseCacheOptions(
 
 void IterativeGlobalRefinement(const IncrementalPipelineOptions& options,
                                const IncrementalMapper::Options& mapper_options,
-                               IncrementalMapper& mapper) {
+                               IncrementalMapper& mapper,
+                               std::function<bool()> check_if_stopped) {
   LOG(INFO) << "Retriangulation and Global bundle adjustment";
+  BundleAdjustmentOptions ba_options = options.GlobalBundleAdjustment();
+  ba_options.check_if_stopped = std::move(check_if_stopped);
   mapper.IterativeGlobalRefinement(options.ba_global_max_refinements,
                                    options.ba_global_max_refinement_change,
                                    mapper_options,
-                                   options.GlobalBundleAdjustment(),
+                                   ba_options,
                                    options.Triangulation());
-  mapper.FilterFrames(mapper_options);
+  if (!ba_options.check_if_stopped || !ba_options.check_if_stopped()) {
+    mapper.FilterFrames(mapper_options);
+  }
 }
 
 void ExtractColors(const std::filesystem::path& image_path,
@@ -491,6 +496,9 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
     LOG(INFO) << "Finding good initial image pair";
     const bool find_init_success = mapper.FindInitialImagePair(
         mapper_options, image_id1, image_id2, cam2_from_cam1);
+    if (CheckIfStopped() || CheckReachedMaxRuntime()) {
+      return Status::INTERRUPTED;
+    }
     if (!find_init_success) {
       LOG(INFO) << "=> No good initial image pair found.";
       return Status::NO_INITIAL_PAIR;
@@ -531,7 +539,12 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   }
 
   LOG(INFO) << "Global bundle adjustment";
-  mapper.AdjustGlobalBundle(mapper_options, options_->GlobalBundleAdjustment());
+  BundleAdjustmentOptions ba_options = options_->GlobalBundleAdjustment();
+  ba_options.check_if_stopped = [this]() { return CheckIfStopped(); };
+  mapper.AdjustGlobalBundle(mapper_options, ba_options);
+  if (CheckIfStopped() || CheckReachedMaxRuntime()) {
+    return Status::INTERRUPTED;
+  }
   reconstruction.Normalize();
   mapper.FilterPoints(mapper_options);
   mapper.FilterFrames(mapper_options);
@@ -684,16 +697,27 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
       for (const data_t& data_id : image.FramePtr()->ImageIds()) {
         mapper.TriangulateImage(options_->Triangulation(), data_id.id);
       }
+      BundleAdjustmentOptions ba_options = options_->LocalBundleAdjustment();
+      ba_options.check_if_stopped = [this]() { return CheckIfStopped(); };
       mapper.IterativeLocalRefinement(options_->ba_local_max_refinements,
                                       options_->ba_local_max_refinement_change,
                                       mapper_options,
-                                      options_->LocalBundleAdjustment(),
+                                      ba_options,
                                       options_->Triangulation(),
                                       next_image_id);
 
+      if (CheckIfStopped() || CheckReachedMaxRuntime()) {
+        break;
+      }
+
       if (CheckRunGlobalRefinement(
               *reconstruction, ba_prev_num_reg_frames, ba_prev_num_points)) {
-        IterativeGlobalRefinement(*options_, mapper_options, mapper);
+        IterativeGlobalRefinement(*options_, mapper_options, mapper, [this]() {
+          return CheckIfStopped();
+        });
+        if (CheckIfStopped() || CheckReachedMaxRuntime()) {
+          break;
+        }
         ba_prev_num_points = reconstruction->NumPoints3D();
         ba_prev_num_reg_frames = reconstruction->NumRegFrames();
       }
@@ -724,7 +748,9 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
     // bundle adjustment and try again to register one image. If this fails
     // once, then exit the incremental mapping.
     if (!reg_next_success && prev_reg_next_success) {
-      IterativeGlobalRefinement(*options_, mapper_options, mapper);
+      IterativeGlobalRefinement(*options_, mapper_options, mapper, [this]() {
+        return CheckIfStopped();
+      });
     }
   } while (reg_next_success || prev_reg_next_success);
 
@@ -736,7 +762,9 @@ IncrementalPipeline::Status IncrementalPipeline::ReconstructSubModel(
   if (reconstruction->NumRegFrames() > 0 &&
       reconstruction->NumRegFrames() != ba_prev_num_reg_frames &&
       reconstruction->NumPoints3D() != ba_prev_num_points) {
-    IterativeGlobalRefinement(*options_, mapper_options, mapper);
+    IterativeGlobalRefinement(*options_, mapper_options, mapper, [this]() {
+      return CheckIfStopped();
+    });
   }
   return Status::SUCCESS;
 }
@@ -762,6 +790,11 @@ IncrementalPipeline::Status IncrementalPipeline::Reconstruct(
         ReconstructSubModel(mapper, mapper_options, reconstruction);
     switch (status) {
       case Status::INTERRUPTED: {
+        if (reconstruction->NumRegFrames() == 0) {
+          mapper.EndReconstruction(/*discard=*/true);
+          reconstruction_manager_->Delete(reconstruction_idx);
+          return Status::STOP;
+        }
         reconstruction->UpdatePoint3DErrors();
         LOG(INFO) << "Keeping reconstruction due to interrupt";
         mapper.EndReconstruction(/*discard=*/false);
@@ -860,6 +893,9 @@ void IncrementalPipeline::TriangulateReconstruction(
   LOG(INFO) << "Iterative triangulation";
   size_t image_idx = 0;
   for (const image_t image_id : reconstruction->RegImageIds()) {
+    if (CheckIfStopped()) {
+      break;
+    }
     const auto& image = reconstruction->Image(image_id);
 
     LOG(INFO) << StringPrintf(
@@ -874,20 +910,26 @@ void IncrementalPipeline::TriangulateReconstruction(
             << (image.NumPoints3D() - num_existing_points3D) << " points";
   }
 
-  LOG(INFO) << "Retriangulation and Global bundle adjustment";
-  mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
-                                   options_->ba_global_max_refinement_change,
-                                   options_->Mapper(),
-                                   options_->GlobalBundleAdjustment(),
-                                   options_->Triangulation(),
-                                   /*normalize_reconstruction=*/false);
+  if (!CheckIfStopped()) {
+    LOG(INFO) << "Retriangulation and Global bundle adjustment";
+    BundleAdjustmentOptions ba_options = options_->GlobalBundleAdjustment();
+    ba_options.check_if_stopped = [this]() { return CheckIfStopped(); };
+    mapper.IterativeGlobalRefinement(options_->ba_global_max_refinements,
+                                     options_->ba_global_max_refinement_change,
+                                     options_->Mapper(),
+                                     ba_options,
+                                     options_->Triangulation(),
+                                     /*normalize_reconstruction=*/false);
+  }
   mapper.EndReconstruction(/*discard=*/false);
 
   reconstruction->UpdatePoint3DErrors();
 
-  LOG(INFO) << "Extracting colors";
-  reconstruction->ExtractColorsForAllImages(options_->image_path,
-                                            options_->num_threads);
+  if (!CheckIfStopped()) {
+    LOG(INFO) << "Extracting colors";
+    reconstruction->ExtractColorsForAllImages(options_->image_path,
+                                              options_->num_threads);
+  }
 }
 
 void IncrementalPipeline::RegisterCallbacks() {

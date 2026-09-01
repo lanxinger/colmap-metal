@@ -50,7 +50,9 @@
 #include <functional>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <tuple>
+#include <utility>
 
 namespace colmap {
 namespace {
@@ -75,6 +77,13 @@ FeatureDescriptors CreateEmptyDescriptors() {
 // Helper to create reversed descriptors for testing matcher symmetry.
 FeatureDescriptors CreateReversedDescriptors(const FeatureDescriptors& src) {
   return FeatureDescriptors(src.type, src.data.colwise().reverse());
+}
+
+template <typename Derived>
+FeatureKeypoint FeatureKeypointFromImagePoint(
+    const Eigen::MatrixBase<Derived>& image_point) {
+  return FeatureKeypoint(static_cast<float>(image_point.x()),
+                         static_cast<float>(image_point.y()));
 }
 
 void ValidateKeypoints(const FeatureKeypoints& keypoints,
@@ -962,9 +971,9 @@ void TestGuidedMatchingWithCameraDistortion(
   const FeatureMatcher::Image image1 = {
       /*image_id=*/1,
       /*camera=*/&camera,
-      std::make_shared<FeatureKeypoints>(
-          std::vector<FeatureKeypoint>{{img_point11.x(), img_point11.y()},
-                                       {img_point12.x(), img_point12.y()}}),
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point11),
+          FeatureKeypointFromImagePoint(img_point12)}),
       std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
   const FeatureMatcher::Image image2 = {
       /*image_id=*/2,
@@ -1005,9 +1014,694 @@ void TestGuidedMatchingWithCameraDistortion(
   EXPECT_EQ(two_view_geometry.inlier_matches.size(), 0);
 }
 
+// Guided matching for a spherical camera, with correspondences deliberately in
+// the back hemisphere. Those pixels have no normalized image plane
+// representation at all - CamFromImg fails for them - so they are only
+// matchable via the full-sphere bearing.
+void TestGuidedMatchingSpherical(
+    const std::function<std::unique_ptr<FeatureMatcher>(
+        const std::vector<FeatureMatcher::Image>&)>& matcher_factory) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, /*focal_length=*/0, 512, 256);
+
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 0, 0));
+
+  // Both points are behind both cameras, i.e. in the back hemisphere.
+  const Eigen::Vector3d point3D1(0.3, 0.1, -2.0);
+  const Eigen::Vector3d point3D2(-0.25, -0.15, -2.5);
+
+  auto project = [&camera](const Eigen::Vector3d& point3D) {
+    const std::optional<Eigen::Vector2d> image_point =
+        camera.ImgFromCam(point3D);
+    THROW_CHECK(image_point.has_value());
+    // The premise of this test: these pixels are unprojectable through the
+    // normalized image plane. If this ever starts failing, the test is no
+    // longer exercising the back hemisphere.
+    EXPECT_FALSE(camera.CamFromImg(*image_point).has_value());
+    return image_point->cast<float>().eval();
+  };
+
+  const Eigen::Vector2f img_point11 = project(point3D1);
+  const Eigen::Vector2f img_point12 = project(point3D2);
+  const Eigen::Vector2f img_point21 = project(cam2_from_cam1 * point3D2);
+  const Eigen::Vector2f img_point22 = project(cam2_from_cam1 * point3D1);
+
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point11),
+          FeatureKeypointFromImagePoint(img_point12)}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{{img_point21.x(), img_point21.y()},
+                                       {img_point22.x(), img_point22.y()}}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+
+  // Same as image2, but with the second correspondence replaced by a decoy far
+  // off the epipolar great circle, which must be rejected.
+  //
+  // This is the load-bearing assertion. Recovering the matches above is
+  // necessary but not sufficient: when every keypoint is unprojectable, the old
+  // sentinel mapped them all to the same location, so the guided filter scored
+  // every pair identically and degenerated into accepting everything - and
+  // plain descriptor matching then produced the right answer anyway. Only a
+  // decoy that the filter must actively reject distinguishes "the epipolar
+  // constraint is evaluated correctly for back-hemisphere rays" from "the
+  // constraint has stopped constraining anything".
+  const Eigen::Vector2f img_point_decoy =
+      project(cam2_from_cam1 * Eigen::Vector3d(2.0, -1.5, -0.5));
+  const FeatureMatcher::Image image3 = {
+      /*image_id=*/3,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          {img_point21.x(), img_point21.y()},
+          {img_point_decoy.x(), img_point_decoy.y()}}),
+      image2.descriptors};
+
+  auto matcher = matcher_factory({image1, image2, image3});
+
+  TwoViewGeometry two_view_geometry;
+  two_view_geometry.config = TwoViewGeometry::CALIBRATED;
+  two_view_geometry.E = EssentialMatrixFromPose(cam2_from_cam1);
+
+  constexpr double kMaxError = 4.0;
+
+  matcher->MatchGuided(kMaxError, image1, image2, &two_view_geometry);
+  ExpectReversedInlierMatches(two_view_geometry);
+
+  matcher->MatchGuided(kMaxError, image1, image3, &two_view_geometry);
+  ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
+}
+
+// One correspondence in the front hemisphere and one in the back, to verify
+// the two are handled by the same code path rather than being swapped.
+void TestGuidedMatchingSphericalMixedHemispheres(
+    const std::function<std::unique_ptr<FeatureMatcher>(
+        const std::vector<FeatureMatcher::Image>&)>& matcher_factory) {
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, /*focal_length=*/0, 512, 256);
+
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 0, 0));
+
+  const Eigen::Vector3d point3D_front(0.2, 0.1, 2.0);
+  const Eigen::Vector3d point3D_back(-0.25, -0.15, -2.5);
+
+  auto project = [&camera](const Eigen::Vector3d& point3D) {
+    const std::optional<Eigen::Vector2d> image_point =
+        camera.ImgFromCam(point3D);
+    THROW_CHECK(image_point.has_value());
+    return image_point->cast<float>().eval();
+  };
+
+  const Eigen::Vector2f img_point11 = project(point3D_front);
+  const Eigen::Vector2f img_point12 = project(point3D_back);
+  const Eigen::Vector2f img_point21 = project(cam2_from_cam1 * point3D_back);
+  const Eigen::Vector2f img_point22 = project(cam2_from_cam1 * point3D_front);
+
+  EXPECT_TRUE(camera.CamFromImg(img_point11.cast<double>()).has_value());
+  EXPECT_FALSE(camera.CamFromImg(img_point12.cast<double>()).has_value());
+
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{{img_point11.x(), img_point11.y()},
+                                       {img_point12.x(), img_point12.y()}}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{{img_point21.x(), img_point21.y()},
+                                       {img_point22.x(), img_point22.y()}}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+
+  // Replaces the back-hemisphere correspondence with a decoy off the epipolar
+  // great circle, so that the filter has to actively reject it. See the
+  // comment in TestGuidedMatchingSpherical for why this is what discriminates.
+  const Eigen::Vector2f img_point_decoy =
+      project(cam2_from_cam1 * Eigen::Vector3d(2.0, -1.5, -0.5));
+  const FeatureMatcher::Image image3 = {
+      /*image_id=*/3,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          {img_point_decoy.x(), img_point_decoy.y()},
+          {img_point22.x(), img_point22.y()}}),
+      image2.descriptors};
+
+  auto matcher = matcher_factory({image1, image2, image3});
+
+  TwoViewGeometry two_view_geometry;
+  two_view_geometry.config = TwoViewGeometry::CALIBRATED;
+  two_view_geometry.E = EssentialMatrixFromPose(cam2_from_cam1);
+
+  constexpr double kMaxError = 4.0;
+
+  matcher->MatchGuided(kMaxError, image1, image2, &two_view_geometry);
+  ExpectReversedInlierMatches(two_view_geometry);
+
+  // Only the front-hemisphere correspondence survives.
+  matcher->MatchGuided(kMaxError, image1, image3, &two_view_geometry);
+  ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 0);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 1);
+}
+
+// A keypoint the camera cannot unproject must be rejected outright. It used to
+// be relocated to a (1e6, 1e6) sentinel, which does not reject: the Sampson
+// error is a ratio whose numerator and denominator scale together, so the
+// residual converges to the finite squared distance from the partner to the
+// epipolar line of the point at infinity in direction (1, 1, 0). Any partner
+// near that line was therefore silently accepted.
+void TestGuidedMatchingUnprojectableKeypoints(
+    const std::function<std::unique_ptr<FeatureMatcher>(
+        const std::vector<FeatureMatcher::Image>&)>& matcher_factory) {
+  Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kOpenCV, 100.0, 100, 200);
+  camera.params[4] = -0.5;  // k1
+  camera.params[5] = 0.5;   // k2
+  camera.params[6] = -0.5;  // p1
+
+  // Well inside a region where the iterative undistortion does not converge.
+  const Eigen::Vector2d unprojectable(50.0, 150.0);
+  ASSERT_FALSE(camera.CamFromImg(unprojectable).has_value());
+
+  auto project = [&camera](const Eigen::Vector3d& point3D) {
+    const std::optional<Eigen::Vector2d> image_point =
+        camera.ImgFromCam(point3D);
+    THROW_CHECK(image_point.has_value());
+    // Everything except the sentinel keypoint must be a normal, usable
+    // keypoint, or the test would pass for the wrong reason.
+    EXPECT_TRUE(camera.CamFromImg(*image_point).has_value());
+    return image_point->cast<float>().eval();
+  };
+
+  // A translation with tx == ty, so that the epipolar line of the sentinel
+  // direction (1, 1, 0) passes through the image center and the decoy below
+  // can sit on it at a well-behaved location.
+  const Rigid3d cam2_from_cam1(Eigen::Quaterniond::Identity(),
+                               Eigen::Vector3d(1, 1, 1));
+  const Eigen::Matrix3d E = EssentialMatrixFromPose(cam2_from_cam1);
+
+  const Eigen::Vector3d point3D(-0.3, -0.2, 2.0);
+  const Eigen::Vector2f img_point_good1 = project(point3D);
+  const Eigen::Vector2f img_point_good2 = project(cam2_from_cam1 * point3D);
+
+  // The old (1e6, 1e6) sentinel converges to the direction (1, 1, 0); its
+  // epipolar line is where spurious matches used to concentrate, so the decoy
+  // is placed exactly on it.
+  const Eigen::Vector3d sentinel_line = E * Eigen::Vector3d(1, 1, 0);
+  const double decoy_x = 0.2;
+  const double decoy_y =
+      -(sentinel_line.x() * decoy_x + sentinel_line.z()) / sentinel_line.y();
+  const Eigen::Vector2f img_point_decoy = project({decoy_x, decoy_y, 1.0});
+
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          {static_cast<float>(unprojectable.x()),
+           static_cast<float>(unprojectable.y())},
+          {img_point_good1.x(), img_point_good1.y()}}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          {img_point_good2.x(), img_point_good2.y()},
+          {img_point_decoy.x(), img_point_decoy.y()}}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+
+  auto matcher = matcher_factory({image1, image2});
+
+  TwoViewGeometry two_view_geometry;
+  two_view_geometry.config = TwoViewGeometry::CALIBRATED;
+  two_view_geometry.E = E;
+
+  matcher->MatchGuided(/*max_error=*/1.0, image1, image2, &two_view_geometry);
+
+  // Only the good pair survives; the unprojectable keypoint 0 matches nothing.
+  ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
+}
+
+// A spherical planar/panoramic model is stored as a ray homography. Besides
+// exercising that representation, the first correspondence crosses the
+// equirectangular seam and is only an inlier after horizontal wrapping.
+void TestGuidedMatchingSphericalHomography(
+    const std::function<std::unique_ptr<FeatureMatcher>(
+        const std::vector<FeatureMatcher::Image>&)>& matcher_factory) {
+  constexpr double kWidth = 512.0;
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, /*focal_length=*/0, kWidth, 256);
+  const Eigen::Matrix3d H_ray =
+      Eigen::AngleAxisd(2.0 * M_PI * 16.0 / kWidth, Eigen::Vector3d::UnitY())
+          .toRotationMatrix();
+
+  const Eigen::Vector2d img_point11(500.0, 128.0);
+  const Eigen::Vector2d img_point12(100.0, 96.0);
+  auto transfer = [&](const Eigen::Vector2d& image_point) {
+    return camera.ImgFromCam(H_ray * camera.CamRayFromImg(image_point).value())
+        .value();
+  };
+  const Eigen::Vector2d img_point22 = transfer(img_point11);
+  const Eigen::Vector2d img_point21 = transfer(img_point12);
+  EXPECT_NEAR(img_point22.x(), 4.0, 1e-10);
+  EXPECT_NEAR(img_point21.x(), 116.0, 1e-10);
+
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point11),
+          FeatureKeypointFromImagePoint(img_point12)}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point21),
+          FeatureKeypointFromImagePoint(
+              Eigen::Vector2d(kWidth - 1.0, img_point22.y()))}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+  const FeatureMatcher::Image image3 = {
+      /*image_id=*/3,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point21),
+          FeatureKeypointFromImagePoint(
+              Eigen::Vector2d(256.0, img_point22.y()))}),
+      image2.descriptors};
+
+  auto matcher = matcher_factory({image1, image2, image3});
+
+  TwoViewGeometry two_view_geometry;
+  two_view_geometry.config = TwoViewGeometry::PANORAMIC;
+  two_view_geometry.H = H_ray;
+  two_view_geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
+  // Presence of E is part of the spherical estimator's producer signature,
+  // even when the homography wins because translation is unobservable.
+  two_view_geometry.E = Eigen::Matrix3d::Zero();
+  two_view_geometry.inlier_matches = {{0, 1}, {1, 0}};
+
+  matcher->MatchGuided(/*max_error=*/6.0, image1, image2, &two_view_geometry);
+  ExpectReversedInlierMatches(two_view_geometry);
+
+  matcher->MatchGuided(/*max_error=*/6.0, image1, image3, &two_view_geometry);
+  ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
+}
+
+// Calibrated distorted pairs estimate H on rays and store K2 H K1^-1 in the
+// virtual pinhole frame. Raw distorted pixels do not obey that stored matrix,
+// so guided matching must recover H_ray and project through both camera models.
+void TestGuidedMatchingRayHomography(
+    const CameraModelId camera_model_id,
+    const std::function<std::unique_ptr<FeatureMatcher>(
+        const std::vector<FeatureMatcher::Image>&)>& matcher_factory) {
+  Camera camera1 =
+      Camera::CreateFromModelId(1, camera_model_id, 100.0, 200, 200);
+  Camera camera2 =
+      Camera::CreateFromModelId(2, camera_model_id, 120.0, 240, 200);
+  if (camera_model_id == CameraModelId::kOpenCV) {
+    camera1.params[4] = -0.5;
+    camera1.params[5] = 0.5;
+    camera1.params[6] = -0.5;
+    camera2.params[4] = 0.3;
+    camera2.params[5] = -0.1;
+    camera2.params[6] = 0.08;
+    camera2.params[7] = -0.04;
+  }
+  camera1.has_prior_focal_length = true;
+  camera2.has_prior_focal_length = true;
+
+  Eigen::Matrix3d H_ray = Eigen::Matrix3d::Identity();
+  H_ray(0, 2) = 0.2;
+  const Eigen::Vector3d ray1(-0.5, 0.1, 1.0);
+  const Eigen::Vector3d ray2(0.4, -0.1, 1.0);
+  const Eigen::Vector2d img_point11 = camera1.ImgFromCam(ray1).value();
+  const Eigen::Vector2d img_point12 = camera1.ImgFromCam(ray2).value();
+  const Eigen::Vector2d img_point22 = camera2.ImgFromCam(H_ray * ray1).value();
+  const Eigen::Vector2d img_point21 = camera2.ImgFromCam(H_ray * ray2).value();
+  const Eigen::Matrix3d H_stored = camera2.CalibrationMatrix() * H_ray *
+                                   camera1.CalibrationMatrix().inverse();
+
+  // This is deliberately not a raw-pixel homography: direct application is
+  // far outside the matching threshold and would reject the true pairs.
+  EXPECT_GT(((H_stored * img_point11.homogeneous()).hnormalized() - img_point22)
+                .norm(),
+            1.0);
+  EXPECT_GT(((H_stored * img_point12.homogeneous()).hnormalized() - img_point21)
+                .norm(),
+            1.0);
+  // The seed mask below deliberately comes from another model: neither H
+  // interpretation supports its diagonal pairs at the matching threshold. The
+  // former support classifier therefore tied at zero and chose raw pixels.
+  EXPECT_GT((img_point22 - img_point21).norm(), 1.0);
+  EXPECT_GT(((H_stored * img_point11.homogeneous()).hnormalized() - img_point21)
+                .norm(),
+            1.0);
+  EXPECT_GT(((H_stored * img_point12.homogeneous()).hnormalized() - img_point22)
+                .norm(),
+            1.0);
+
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera1,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point11),
+          FeatureKeypointFromImagePoint(img_point12)}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera2,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point21),
+          FeatureKeypointFromImagePoint(img_point22)}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+  Eigen::Vector3d decoy_ray = H_ray * ray1;
+  decoy_ray.y() += 0.5;
+  const Eigen::Vector2d img_point_decoy = camera2.ImgFromCam(decoy_ray).value();
+  const FeatureMatcher::Image image3 = {
+      /*image_id=*/3,
+      /*camera=*/&camera2,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point21),
+          FeatureKeypointFromImagePoint(img_point_decoy)}),
+      image2.descriptors};
+
+  auto matcher = matcher_factory({image1, image2, image3});
+
+  TwoViewGeometry two_view_geometry;
+  two_view_geometry.config = TwoViewGeometry::PLANAR_OR_PANORAMIC;
+  two_view_geometry.H = H_stored;
+  two_view_geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
+  // A planar/panoramic classification may retain a larger E/F inlier mask.
+  // These deliberately non-H seed matches exercise that mixed-support case:
+  // explicit provenance, rather than the seed composition, must select H_ray.
+  two_view_geometry.E = Eigen::Matrix3d::Zero();
+  two_view_geometry.F = Eigen::Matrix3d::Zero();
+  two_view_geometry.inlier_matches = {{0, 0}, {1, 1}};
+
+  matcher->MatchGuided(/*max_error=*/1.0, image1, image2, &two_view_geometry);
+  ExpectReversedInlierMatches(two_view_geometry);
+
+  matcher->MatchGuided(/*max_error=*/1.0, image1, image3, &two_view_geometry);
+  ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
+}
+
+// A force-H/legacy homography remains defined on raw pixels even when the
+// camera is distorted and its record also carries E+F. Verified seed inliers
+// must keep it on the existing pixel-H path rather than reinterpret it as
+// H_ray.
+void TestGuidedMatchingDistortedPixelHomography(
+    const std::function<std::unique_ptr<FeatureMatcher>(
+        const std::vector<FeatureMatcher::Image>&)>& matcher_factory) {
+  Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kOpenCV, 100.0, 200, 200);
+  camera.params[4] = -0.5;
+  camera.params[5] = 0.5;
+  camera.params[6] = -0.5;
+  camera.has_prior_focal_length = true;
+
+  Eigen::Matrix3d H_pixel = Eigen::Matrix3d::Identity();
+  H_pixel(0, 2) = 20.0;
+  const Eigen::Vector2d img_point11 =
+      camera.ImgFromCam({-0.5, 0.1, 1.0}).value();
+  const Eigen::Vector2d img_point12 =
+      camera.ImgFromCam({0.4, -0.1, 1.0}).value();
+  const Eigen::Vector2d img_point22 =
+      (H_pixel * img_point11.homogeneous()).hnormalized();
+  const Eigen::Vector2d img_point21 =
+      (H_pixel * img_point12.homogeneous()).hnormalized();
+
+  const Eigen::Matrix3d misinterpreted_H_ray =
+      camera.CalibrationMatrix().inverse() * H_pixel *
+      camera.CalibrationMatrix();
+  EXPECT_GT((camera
+                 .ImgFromCam(misinterpreted_H_ray *
+                             camera.CamRayFromImg(img_point11).value())
+                 .value() -
+             img_point22)
+                .norm(),
+            1.0);
+  EXPECT_GT((camera
+                 .ImgFromCam(misinterpreted_H_ray *
+                             camera.CamRayFromImg(img_point12).value())
+                 .value() -
+             img_point21)
+                .norm(),
+            1.0);
+
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point11),
+          FeatureKeypointFromImagePoint(img_point12)}),
+      std::make_shared<FeatureDescriptors>(CreateRandomFeatureDescriptors(2))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point21),
+          FeatureKeypointFromImagePoint(img_point22)}),
+      std::make_shared<FeatureDescriptors>(
+          CreateReversedDescriptors(*image1.descriptors))};
+  const FeatureMatcher::Image image3 = {
+      /*image_id=*/3,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(std::vector<FeatureKeypoint>{
+          FeatureKeypointFromImagePoint(img_point21),
+          FeatureKeypointFromImagePoint(img_point22 + Eigen::Vector2d(0, 20))}),
+      image2.descriptors};
+
+  auto matcher = matcher_factory({image1, image2, image3});
+  TwoViewGeometry two_view_geometry;
+  two_view_geometry.config = TwoViewGeometry::PLANAR;
+  two_view_geometry.H = H_pixel;
+  two_view_geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::PIXEL;
+  // Explicit pixel provenance must retain the raw-H path even when all three
+  // matrices are present.
+  two_view_geometry.E = Eigen::Matrix3d::Zero();
+  two_view_geometry.F = Eigen::Matrix3d::Zero();
+  two_view_geometry.inlier_matches = {{0, 1}, {1, 0}};
+
+  TwoViewGeometry misrouted_geometry = two_view_geometry;
+  misrouted_geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
+  misrouted_geometry.inlier_matches.clear();
+  matcher->MatchGuided(
+      /*max_error=*/0.5, image1, image2, &misrouted_geometry);
+  EXPECT_TRUE(misrouted_geometry.inlier_matches.empty());
+
+  TwoViewGeometry unknown_geometry = two_view_geometry;
+  unknown_geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::UNKNOWN;
+  unknown_geometry.inlier_matches.clear();
+  matcher->MatchGuided(/*max_error=*/0.5, image1, image2, &unknown_geometry);
+  ExpectReversedInlierMatches(unknown_geometry);
+
+  matcher->MatchGuided(/*max_error=*/0.5, image1, image2, &two_view_geometry);
+  ExpectReversedInlierMatches(two_view_geometry);
+
+  matcher->MatchGuided(/*max_error=*/0.5, image1, image3, &two_view_geometry);
+  ASSERT_EQ(two_view_geometry.inlier_matches.size(), 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx1, 1);
+  EXPECT_EQ(two_view_geometry.inlier_matches[0].point2D_idx2, 0);
+}
+
+// Geometrically rejected candidates historically contribute the maximum SIFT
+// distance to the ratio test. Keep that sentinel in the streaming ray-H path:
+// with one weak valid candidate and one rejected perfect descriptor, the weak
+// candidate must fail the ratio test rather than be compared against infinity.
+TEST(MatchGuidedSiftFeaturesCPU, RayHomographyPreservesRatioSentinel) {
+  Camera camera =
+      Camera::CreateFromModelId(1, CameraModelId::kOpenCV, 100.0, 200, 200);
+  camera.params[4] = -0.5;
+  camera.params[5] = 0.5;
+  camera.params[6] = -0.5;
+  camera.has_prior_focal_length = true;
+
+  Eigen::Matrix3d H_ray = Eigen::Matrix3d::Identity();
+  H_ray(0, 2) = 0.2;
+  const Eigen::Vector2d point1 =
+      camera.ImgFromCam(Eigen::Vector3d(-0.5, 0.1, 1.0)).value();
+  const Eigen::Vector2d point2 =
+      camera.ImgFromCam(H_ray * Eigen::Vector3d(-0.5, 0.1, 1.0)).value();
+  const Eigen::Vector2d decoy = point2 + Eigen::Vector2d(0, 20);
+  const Eigen::Matrix3d H_stored =
+      camera.CalibrationMatrix() * H_ray * camera.CalibrationMatrix().inverse();
+  EXPECT_GT(((H_stored * point1.homogeneous()).hnormalized() - point2).norm(),
+            0.5);
+
+  FeatureDescriptorsData descriptors1_data =
+      FeatureDescriptorsData::Zero(1, 128);
+  FeatureDescriptorsData descriptors2_data =
+      FeatureDescriptorsData::Zero(2, 128);
+  descriptors2_data(0, 0) = 255;
+  descriptors2_data(0, 1) = 255;
+  descriptors2_data(0, 2) = 255;
+  const FeatureMatcher::Image image1 = {
+      /*image_id=*/1,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{FeatureKeypointFromImagePoint(point1)}),
+      std::make_shared<FeatureDescriptors>(FeatureExtractorType::SIFT,
+                                           std::move(descriptors1_data))};
+  const FeatureMatcher::Image image2 = {
+      /*image_id=*/2,
+      /*camera=*/&camera,
+      std::make_shared<FeatureKeypoints>(
+          std::vector<FeatureKeypoint>{FeatureKeypointFromImagePoint(point2),
+                                       FeatureKeypointFromImagePoint(decoy)}),
+      std::make_shared<FeatureDescriptors>(FeatureExtractorType::SIFT,
+                                           std::move(descriptors2_data))};
+
+  FeatureDescriptorIndexCacheHelper index_cache_helper({image1, image2});
+  FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+  options.use_gpu = false;
+  options.sift->cpu_descriptor_index_cache = &index_cache_helper.index_cache;
+  options.sift->cross_check = false;
+  options.sift->max_ratio = 0.8;
+  options.sift->max_distance = 0.9;
+  auto matcher = THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+
+  TwoViewGeometry geometry;
+  geometry.config = TwoViewGeometry::PLANAR_OR_PANORAMIC;
+  geometry.E = Eigen::Matrix3d::Zero();
+  geometry.F = Eigen::Matrix3d::Zero();
+  geometry.H = H_stored;
+  geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
+  geometry.inlier_matches = {{0, 0}};
+  matcher->MatchGuided(/*max_error=*/0.5, image1, image2, &geometry);
+  EXPECT_TRUE(geometry.inlier_matches.empty());
+}
+
 TEST(MatchGuidedSiftFeaturesCPU, EssentialMatrix) {
   std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
   TestGuidedMatchingWithCameraDistortion(
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, Spherical) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingSpherical(
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, SphericalHomography) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingSphericalHomography(
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, DistortedRayHomography) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingRayHomography(
+      CameraModelId::kOpenCV,
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, ZeroDistortionFisheyeRayHomography) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingRayHomography(
+      CameraModelId::kOpenCVFisheye,
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, DistortedPixelHomography) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingDistortedPixelHomography(
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, SphericalMixedHemispheres) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingSphericalMixedHemispheres(
+      [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
+        index_cache_helper =
+            std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
+        FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+        options.use_gpu = false;
+        options.sift->cpu_descriptor_index_cache =
+            &index_cache_helper->index_cache;
+        return CreateSiftFeatureMatcher(options);
+      });
+}
+
+TEST(MatchGuidedSiftFeaturesCPU, UnprojectableKeypoints) {
+  std::unique_ptr<FeatureDescriptorIndexCacheHelper> index_cache_helper;
+  TestGuidedMatchingUnprojectableKeypoints(
       [&index_cache_helper](const std::vector<FeatureMatcher::Image>& images) {
         index_cache_helper =
             std::make_unique<FeatureDescriptorIndexCacheHelper>(images);
@@ -1547,6 +2241,92 @@ TEST(MatchGuidedSiftFeaturesGPU, EssentialMatrix) {
   });
 }
 
+TEST(MatchGuidedSiftFeaturesGPU, Spherical) {
+  RunGpuTest([] {
+    TestGuidedMatchingSpherical(
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, SphericalHomography) {
+  RunGpuTest([] {
+    TestGuidedMatchingSphericalHomography(
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, DistortedRayHomography) {
+  RunGpuTest([] {
+    TestGuidedMatchingRayHomography(
+        CameraModelId::kOpenCV,
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, ZeroDistortionFisheyeRayHomography) {
+  RunGpuTest([] {
+    TestGuidedMatchingRayHomography(
+        CameraModelId::kOpenCVFisheye,
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, DistortedPixelHomography) {
+  RunGpuTest([] {
+    TestGuidedMatchingDistortedPixelHomography(
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, SphericalMixedHemispheres) {
+  RunGpuTest([] {
+    TestGuidedMatchingSphericalMixedHemispheres(
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
+TEST(MatchGuidedSiftFeaturesGPU, UnprojectableKeypoints) {
+  RunGpuTest([] {
+    TestGuidedMatchingUnprojectableKeypoints(
+        [](const std::vector<FeatureMatcher::Image>& images) {
+          FeatureMatchingOptions options(FeatureMatcherType::SIFT_BRUTEFORCE);
+          options.use_gpu = true;
+          options.max_num_matches = 1000;
+          return THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(options));
+        });
+  });
+}
+
 TEST(MatchGuidedSiftFeaturesGPU, RefreshesInPlaceCameraMutation) {
   RunGpuTest([] {
     Camera camera1 = Camera::CreateFromModelId(
@@ -1586,6 +2366,101 @@ TEST(MatchGuidedSiftFeaturesGPU, RefreshesInPlaceCameraMutation) {
     matcher->MatchGuided(1.0, image1, image2, &geometry);
     EXPECT_TRUE(geometry.inlier_matches.empty());
   });
+}
+
+// The GPU tangent Sampson kernel must reproduce the CPU reference
+// implementation on the same input. This is the check that distinguishes a
+// genuine kernel bug from a plumbing bug, since the CPU path is independently
+// tested above.
+TEST(MatchGuidedSiftFeaturesCPUvsGPUGuided, EssentialMatrix) {
+  const size_t kNumFeatures = 200;
+  std::vector<Camera> cameras;
+  cameras.push_back(Camera::CreateFromModelId(
+      1, CameraModelId::kSimplePinhole, 650.0, 1024, 768));
+  cameras.push_back(Camera::CreateFromModelId(
+      2, CameraModelId::kOpenCVFisheye, 350.0, 1024, 768));
+  cameras.push_back(Camera::CreateFromModelId(
+      3, CameraModelId::kEquirectangular, 0.0, 1000, 500));
+
+  for (const Camera& camera : cameras) {
+    SetPRNGSeed(42);
+    FeatureKeypoints keypoints1(kNumFeatures);
+    FeatureKeypoints keypoints2(kNumFeatures);
+    for (size_t i = 0; i < kNumFeatures; ++i) {
+      keypoints1[i] =
+          FeatureKeypoint(RandomUniformReal<float>(1.0f, camera.width - 1.0f),
+                          RandomUniformReal<float>(1.0f, camera.height - 1.0f));
+      keypoints2[i] =
+          FeatureKeypoint(RandomUniformReal<float>(1.0f, camera.width - 1.0f),
+                          RandomUniformReal<float>(1.0f, camera.height - 1.0f));
+    }
+
+    const FeatureMatcher::Image image1 = {
+        /*image_id=*/1,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(keypoints1),
+        std::make_shared<FeatureDescriptors>(
+            CreateRandomFeatureDescriptors(kNumFeatures))};
+    const FeatureMatcher::Image image2 = {
+        /*image_id=*/2,
+        /*camera=*/&camera,
+        std::make_shared<FeatureKeypoints>(keypoints2),
+        std::make_shared<FeatureDescriptors>(
+            CreateRandomFeatureDescriptors(kNumFeatures))};
+
+    TwoViewGeometry geometry;
+    geometry.config = TwoViewGeometry::CALIBRATED;
+    geometry.E = EssentialMatrixFromPose(
+        Rigid3d(Eigen::Quaterniond(Eigen::AngleAxisd(
+                    0.2, Eigen::Vector3d(0.3, 1.0, 0.2).normalized())),
+                Eigen::Vector3d(1.0, 0.15, 0.05).normalized()));
+
+    // A loose threshold so a non-trivial number of pairs survive the filter.
+    constexpr double kMaxError = 30.0;
+
+    FeatureDescriptorIndexCacheHelper index_cache_helper({image1, image2});
+    FeatureMatchingOptions cpu_options(FeatureMatcherType::SIFT_BRUTEFORCE);
+    cpu_options.use_gpu = false;
+    cpu_options.sift->cpu_descriptor_index_cache =
+        &index_cache_helper.index_cache;
+    TwoViewGeometry cpu_geometry = geometry;
+    CreateSiftFeatureMatcher(cpu_options)
+        ->MatchGuided(kMaxError, image1, image2, &cpu_geometry);
+
+    EXPECT_GT(cpu_geometry.inlier_matches.size(), 0u)
+        << "model " << camera.ModelName();
+
+    // Note that the assertions must live inside the lambda, since the body is
+    // not executed if the GPU/OpenGL context is unavailable.
+    RunGpuTest([&] {
+      TwoViewGeometry gpu_geometry = geometry;
+      FeatureMatchingOptions gpu_options(FeatureMatcherType::SIFT_BRUTEFORCE);
+      gpu_options.use_gpu = true;
+      gpu_options.max_num_matches = 4 * kNumFeatures;
+      THROW_CHECK_NOTNULL(CreateSiftFeatureMatcher(gpu_options))
+          ->MatchGuided(kMaxError, image1, image2, &gpu_geometry);
+
+      // The CPU scores in double and the GPU in float, so a pair whose tangent
+      // Sampson residual sits within float epsilon of kMaxError can flip
+      // inclusion. Compare as sets and tolerate a few boundary flips rather
+      // than requiring identical size and order.
+      const auto to_set = [](const FeatureMatches& matches) {
+        std::set<std::pair<point2D_t, point2D_t>> set;
+        for (const auto& match : matches) {
+          set.emplace(match.point2D_idx1, match.point2D_idx2);
+        }
+        return set;
+      };
+      const std::set<std::pair<point2D_t, point2D_t>> cpu_set =
+          to_set(cpu_geometry.inlier_matches);
+      const std::set<std::pair<point2D_t, point2D_t>> gpu_set =
+          to_set(gpu_geometry.inlier_matches);
+      size_t num_disagree = 0;
+      for (const auto& match : cpu_set) num_disagree += !gpu_set.count(match);
+      for (const auto& match : gpu_set) num_disagree += !cpu_set.count(match);
+      EXPECT_LE(num_disagree, 4u) << "model " << camera.ModelName();
+    });
+  }
 }
 
 TEST(MatchGuidedSiftFeaturesGPU, SharedFocal) {

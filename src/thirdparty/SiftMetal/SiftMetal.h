@@ -49,10 +49,23 @@ struct MatchKeypoint {
   float y;
 };
 
+struct MatchCamRayWithJac {
+  float x;
+  float y;
+  float z;
+  float jacobian_col0_x;
+  float jacobian_col0_y;
+  float jacobian_col0_z;
+  float jacobian_col1_x;
+  float jacobian_col1_y;
+  float jacobian_col1_z;
+};
+
 enum class MatchGuidedGeometry {
   NONE = 0,
   EPIPOLAR = 1,
   HOMOGRAPHY = 2,
+  TANGENT_EPIPOLAR = 3,
 };
 
 struct MatchOptions {
@@ -115,6 +128,15 @@ class SiftMetalMatcher {
                    const float matrix[9],
                    float max_residual,
                    std::vector<MatchResult>* matches);
+
+  bool MatchGuidedTangent(const uint8_t* descriptors1, int num_descriptors1,
+                          const MatchCamRayWithJac* cam_rays1,
+                          const uint8_t* descriptors2, int num_descriptors2,
+                          const MatchCamRayWithJac* cam_rays2,
+                          const MatchOptions& options,
+                          const float essential_matrix[9],
+                          float max_residual,
+                          std::vector<MatchResult>* matches);
 
  private:
   std::unique_ptr<SiftMetalMatcherImpl> impl_;

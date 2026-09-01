@@ -45,7 +45,8 @@ void RunPointTriangulatorImpl(
     const std::filesystem::path& output_path,
     const IncrementalPipelineOptions& options,
     bool clear_points,
-    bool refine_intrinsics);
+    bool refine_intrinsics,
+    std::function<bool()> check_if_stopped = {});
 
 bool RunIncrementalMapperImpl(
     const std::filesystem::path& database_path,
@@ -54,7 +55,8 @@ bool RunIncrementalMapperImpl(
     const std::shared_ptr<IncrementalPipelineOptions>& mapper_options,
     std::shared_ptr<ReconstructionManager>& reconstruction_manager,
     std::function<void()> initial_image_pair_callback = {},
-    std::function<void()> next_image_callback = {});
+    std::function<void()> next_image_callback = {},
+    std::function<bool()> check_if_stopped = {});
 
 bool RunGlobalMapperImpl(
     const std::filesystem::path& database_path,

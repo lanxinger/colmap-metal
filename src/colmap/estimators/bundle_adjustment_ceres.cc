@@ -148,11 +148,19 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
 
 #ifdef COLMAP_CUDA_ENABLED
   bool cuda_solver_enabled = false;
+  const bool cuda_solver_requested =
+      use_gpu && num_images >= min_num_images_gpu_solver;
+  const bool use_cuda_solver = cuda_solver_requested && GetNumCudaDevices() > 0;
+  if (cuda_solver_requested && !use_cuda_solver) {
+    LOG_FIRST_N(WARNING, 1)
+        << "Requested to use GPU for bundle adjustment, but no CUDA GPU is "
+           "available. Falling back to CPU-based solvers.";
+  }
 
 #if (CERES_VERSION_MAJOR >= 3 ||                                \
      (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)) && \
     !defined(CERES_NO_CUDA)
-  if (use_gpu && num_images >= min_num_images_gpu_solver) {
+  if (use_cuda_solver) {
     cuda_solver_enabled = true;
     custom_solver_options.dense_linear_algebra_library_type = ceres::CUDA;
     max_num_images_direct_dense_solver = max_num_images_direct_dense_gpu_solver;
@@ -169,7 +177,7 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
 #if (CERES_VERSION_MAJOR >= 3 ||                                \
      (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 3)) && \
     !defined(CERES_NO_CUDSS)
-  if (use_gpu && num_images >= min_num_images_gpu_solver) {
+  if (use_cuda_solver) {
     cuda_solver_enabled = true;
     custom_solver_options.sparse_linear_algebra_library_type =
         ceres::CUDA_SPARSE;
@@ -571,6 +579,22 @@ std::shared_ptr<CeresBundleAdjustmentSummary> CreateSummaryAndLogFailure(
   return summary;
 }
 
+class CancellationCallback : public ceres::IterationCallback {
+ public:
+  explicit CancellationCallback(std::function<bool()> check_if_stopped)
+      : check_if_stopped_(std::move(check_if_stopped)) {}
+
+  ceres::CallbackReturnType operator()(
+      const ceres::IterationSummary&) override {
+    return check_if_stopped_ && check_if_stopped_()
+               ? ceres::SOLVER_TERMINATE_SUCCESSFULLY
+               : ceres::SOLVER_CONTINUE;
+  }
+
+ private:
+  std::function<bool()> check_if_stopped_;
+};
+
 void LogBundleAdjustmentTiming(const BundleAdjustmentConfig& config,
                                const double setup_time_in_seconds,
                                const ceres::Solver::Summary& summary) {
@@ -603,8 +627,12 @@ ceres::Solver::Summary SolveWithGpuFallback(
     const BundleAdjustmentOptions& options,
     const BundleAdjustmentConfig& config,
     ceres::Problem* problem) {
-  const ceres::Solver::Options solver_options =
+  CancellationCallback cancellation_callback(options.check_if_stopped);
+  ceres::Solver::Options solver_options =
       options.ceres->CreateSolverOptions(config, *problem);
+  if (options.check_if_stopped) {
+    solver_options.callbacks.push_back(&cancellation_callback);
+  }
 
   ceres::Solver::Summary ceres_summary;
   ceres::Solve(solver_options, problem, &ceres_summary);
@@ -620,8 +648,11 @@ ceres::Solver::Summary SolveWithGpuFallback(
       auto cpu_options =
           std::make_shared<CeresBundleAdjustmentOptions>(*options.ceres);
       cpu_options->use_gpu = false;
-      const ceres::Solver::Options cpu_solver_options =
+      ceres::Solver::Options cpu_solver_options =
           cpu_options->CreateSolverOptions(config, *problem);
+      if (options.check_if_stopped) {
+        cpu_solver_options.callbacks.push_back(&cancellation_callback);
+      }
       ceres::Solve(cpu_solver_options, problem, &ceres_summary);
     }
   }

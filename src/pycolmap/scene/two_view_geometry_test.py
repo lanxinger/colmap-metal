@@ -1,3 +1,6 @@
+import copy
+import pickle
+
 import numpy as np
 
 import pycolmap
@@ -39,6 +42,12 @@ def test_two_view_geometry_configuration_multiple():
     assert pycolmap.TwoViewGeometryConfiguration.MULTIPLE is not None
 
 
+def test_homography_estimation_space():
+    assert pycolmap.HomographyEstimationSpace.UNKNOWN is not None
+    assert pycolmap.HomographyEstimationSpace.PIXEL is not None
+    assert pycolmap.HomographyEstimationSpace.CAMERA_RAY is not None
+
+
 def test_two_view_geometry_default_init():
     geometry = pycolmap.TwoViewGeometry()
     assert geometry is not None
@@ -66,9 +75,97 @@ def test_two_view_geometry_f_readwrite():
 
 def test_two_view_geometry_h_readwrite():
     geometry = pycolmap.TwoViewGeometry()
+    geometry.H_estimation_space = pycolmap.HomographyEstimationSpace.CAMERA_RAY
     homography = np.eye(3)
     geometry.H = homography
     np.testing.assert_array_almost_equal(geometry.H, homography)
+    assert (
+        geometry.H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+
+    geometry.H[0, 0] = 2.0
+    assert geometry.H[0, 0] == 2.0
+    assert (
+        geometry.H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+
+    geometry.H = 2.0 * homography
+    np.testing.assert_array_almost_equal(geometry.H, 2.0 * homography)
+    assert (
+        geometry.H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+
+
+def test_two_view_geometry_h_provenance_init_order():
+    geometry_h_first = pycolmap.TwoViewGeometry(
+        H=np.eye(3),
+        H_estimation_space=pycolmap.HomographyEstimationSpace.CAMERA_RAY,
+    )
+    geometry_space_first = pycolmap.TwoViewGeometry(
+        {
+            "H_estimation_space": pycolmap.HomographyEstimationSpace.CAMERA_RAY,
+            "H": np.eye(3),
+        }
+    )
+
+    assert (
+        geometry_h_first.H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+    assert (
+        geometry_space_first.H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+
+
+def test_two_view_geometry_h_provenance_mergedict_order():
+    geometry_h_first = pycolmap.TwoViewGeometry(
+        H=np.eye(3),
+        H_estimation_space=pycolmap.HomographyEstimationSpace.PIXEL,
+    )
+    geometry_space_first = copy.deepcopy(geometry_h_first)
+
+    geometry_h_first.mergedict(
+        {
+            "H": 2.0 * np.eye(3),
+            "H_estimation_space": pycolmap.HomographyEstimationSpace.CAMERA_RAY,
+        }
+    )
+    geometry_space_first.mergedict(
+        {
+            "H_estimation_space": pycolmap.HomographyEstimationSpace.CAMERA_RAY,
+            "H": 2.0 * np.eye(3),
+        }
+    )
+
+    for geometry in (geometry_h_first, geometry_space_first):
+        np.testing.assert_array_almost_equal(geometry.H, 2.0 * np.eye(3))
+        assert (
+            geometry.H_estimation_space
+            == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+        )
+
+
+def test_two_view_geometry_h_provenance_dataclass_roundtrip():
+    geometry = pycolmap.TwoViewGeometry()
+    geometry.H = np.eye(3)
+    geometry.H_estimation_space = pycolmap.HomographyEstimationSpace.CAMERA_RAY
+
+    assert (
+        geometry.todict()["H_estimation_space"]
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+    assert (
+        copy.deepcopy(geometry).H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
+    assert (
+        pickle.loads(pickle.dumps(geometry)).H_estimation_space
+        == pycolmap.HomographyEstimationSpace.CAMERA_RAY
+    )
 
 
 def test_two_view_geometry_cam2_from_cam1_readwrite():

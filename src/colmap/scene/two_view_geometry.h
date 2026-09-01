@@ -67,6 +67,16 @@ struct TwoViewGeometry {
     MULTIPLE = 8,
   };
 
+  // Coordinate space in which the homography was estimated. This provenance is
+  // transient and deliberately not serialized: database-loaded and manually
+  // constructed geometries remain UNKNOWN and take the backwards-compatible
+  // pixel-homography path during guided matching.
+  enum class HomographyEstimationSpace {
+    UNKNOWN = 0,
+    PIXEL = 1,
+    CAMERA_RAY = 2,
+  };
+
   // Defaulted but defined out-of-line to avoid a spurious GCC -Wuninitialized
   // from inlined moves of the std::optional<Camera> members.
   TwoViewGeometry() = default;
@@ -85,6 +95,8 @@ struct TwoViewGeometry {
   std::optional<Eigen::Matrix3d> F;
   // Homography matrix.
   std::optional<Eigen::Matrix3d> H;
+  HomographyEstimationSpace H_estimation_space =
+      HomographyEstimationSpace::UNKNOWN;
 
   // Relative pose.
   std::optional<Rigid3d> cam2_from_cam1;

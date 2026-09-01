@@ -9,25 +9,75 @@ using namespace metal;
 constant float kSqSiftDescriptorNorm = 512.0f * 512.0f;
 constant float kInvSqSiftDescriptorNorm = 1.0f / kSqSiftDescriptorNorm;
 
+static float3 Transform3x3Vector(constant SIFTMatcherParameters& params,
+                                 float3 vector) {
+  return float3(params.matrix[0] * vector.x + params.matrix[1] * vector.y +
+                    params.matrix[2] * vector.z,
+                params.matrix[3] * vector.x + params.matrix[4] * vector.y +
+                    params.matrix[5] * vector.z,
+                params.matrix[6] * vector.x + params.matrix[7] * vector.y +
+                    params.matrix[8] * vector.z);
+}
+
+static float3 Transform3x3TransposeVector(
+    constant SIFTMatcherParameters& params, float3 vector) {
+  return float3(params.matrix[0] * vector.x + params.matrix[3] * vector.y +
+                    params.matrix[6] * vector.z,
+                params.matrix[1] * vector.x + params.matrix[4] * vector.y +
+                    params.matrix[7] * vector.z,
+                params.matrix[2] * vector.x + params.matrix[5] * vector.y +
+                    params.matrix[8] * vector.z);
+}
+
 static float3 Transform3x3(constant SIFTMatcherParameters& params,
                            float x,
                            float y) {
-  return float3(params.matrix[0] * x + params.matrix[1] * y +
-                    params.matrix[2],
-                params.matrix[3] * x + params.matrix[4] * y +
-                    params.matrix[5],
-                params.matrix[6] * x + params.matrix[7] * y +
-                    params.matrix[8]);
+  return Transform3x3Vector(params, float3(x, y, 1.0f));
 }
 
 static bool RejectByGuidedGeometry(
     constant SIFTMatcherParameters& params,
     const device SIFTMatcherKeypoint* keypoints1,
     const device SIFTMatcherKeypoint* keypoints2,
+    const device SIFTMatcherCamRayWithJac* camRays1,
+    const device SIFTMatcherCamRayWithJac* camRays2,
     uint idx1,
     uint idx2) {
   if (params.guidedGeometry == SIFT_MATCHER_GUIDED_NONE) {
     return false;
+  }
+
+  if (params.guidedGeometry == SIFT_MATCHER_GUIDED_TANGENT_EPIPOLAR) {
+    const SIFTMatcherCamRayWithJac camRay1 =
+        params.reverseGuided ? camRays2[idx2] : camRays1[idx1];
+    const SIFTMatcherCamRayWithJac camRay2 =
+        params.reverseGuided ? camRays1[idx1] : camRays2[idx2];
+    const float3 ray1 = float3(camRay1.x, camRay1.y, camRay1.z);
+    const float3 ray2 = float3(camRay2.x, camRay2.y, camRay2.z);
+    const float3 jacobian1Col0 = float3(camRay1.jacobian_col0_x,
+                                       camRay1.jacobian_col0_y,
+                                       camRay1.jacobian_col0_z);
+    const float3 jacobian1Col1 = float3(camRay1.jacobian_col1_x,
+                                       camRay1.jacobian_col1_y,
+                                       camRay1.jacobian_col1_z);
+    const float3 jacobian2Col0 = float3(camRay2.jacobian_col0_x,
+                                       camRay2.jacobian_col0_y,
+                                       camRay2.jacobian_col0_z);
+    const float3 jacobian2Col1 = float3(camRay2.jacobian_col1_x,
+                                       camRay2.jacobian_col1_y,
+                                       camRay2.jacobian_col1_z);
+
+    const float3 eRay1 = Transform3x3Vector(params, ray1);
+    const float3 etRay2 = Transform3x3TransposeVector(params, ray2);
+    const float numerator = dot(ray2, eRay1);
+    const float4 pixelGradient =
+        float4(dot(jacobian1Col0, etRay2),
+               dot(jacobian1Col1, etRay2),
+               dot(jacobian2Col0, eRay1),
+               dot(jacobian2Col1, eRay1));
+    const float denominator = dot(pixelGradient, pixelGradient);
+    return denominator <= 0.0f ||
+           numerator * numerator > params.maxResidual * denominator;
   }
 
   const SIFTMatcherKeypoint kp1 =
@@ -86,6 +136,8 @@ kernel void siftMatchBest(
     const device SIFTMatcherKeypoint* keypoints2 [[buffer(3)]],
     constant SIFTMatcherParameters& params [[buffer(4)]],
     device SIFTMatcherResult* results [[buffer(5)]],
+    const device SIFTMatcherCamRayWithJac* camRays1 [[buffer(6)]],
+    const device SIFTMatcherCamRayWithJac* camRays2 [[buffer(7)]],
     uint gid [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint threadsPerThreadgroup [[threads_per_threadgroup]]) {
@@ -139,7 +191,13 @@ kernel void siftMatchBest(
         descriptors2 + idx2 * SIFT_MATCHER_DESCRIPTOR_DIM);
     for (uint b = 0; b < rowCount; ++b) {
       if (RejectByGuidedGeometry(
-              params, keypoints1, keypoints2, rowBase + b, idx2)) {
+              params,
+              keypoints1,
+              keypoints2,
+              camRays1,
+              camRays2,
+              rowBase + b,
+              idx2)) {
         continue;
       }
 

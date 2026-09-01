@@ -20,10 +20,23 @@
 #define SIFT_MATCHER_GUIDED_NONE 0
 #define SIFT_MATCHER_GUIDED_EPIPOLAR 1
 #define SIFT_MATCHER_GUIDED_HOMOGRAPHY 2
+#define SIFT_MATCHER_GUIDED_TANGENT_EPIPOLAR 3
 
 struct SIFTMatcherKeypoint {
   float x;
   float y;
+};
+
+struct SIFTMatcherCamRayWithJac {
+  float x;
+  float y;
+  float z;
+  float jacobian_col0_x;
+  float jacobian_col0_y;
+  float jacobian_col0_z;
+  float jacobian_col1_x;
+  float jacobian_col1_y;
+  float jacobian_col1_z;
 };
 
 struct SIFTMatcherParameters {

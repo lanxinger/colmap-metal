@@ -103,6 +103,13 @@ struct TwoViewGeometryOptions {
   // default.
   bool use_degensac = false;
 
+  // Locally optimize the fundamental matrix by nonlinearly minimizing the
+  // Sampson error over the inlier set, instead of refitting the linear
+  // eight-point algorithm. The refinement optimizes the same residual RANSAC
+  // scores and keeps the model rank 2 throughout, so no singular value has to
+  // be truncated afterwards. On by default.
+  bool use_sampson_refinement = true;
+
   // Whether to compute the relative pose between the two views.
   bool compute_relative_pose = false;
 
@@ -222,6 +229,37 @@ TwoViewGeometry EstimateCalibratedTwoViewGeometry(
 TwoViewGeometry EstimateSharedFocalTwoViewGeometry(
     const Camera& camera,
     const std::vector<Eigen::Vector2d>& points1,
+    const std::vector<Eigen::Vector2d>& points2,
+    const FeatureMatches& matches,
+    const TwoViewGeometryOptions& options);
+
+// Estimate two-view geometry when exactly one of the two cameras has a known
+// focal length, by jointly recovering the relative pose and the other camera's
+// focal (LO-RANSAC over a minimal 6-point one-sided focal solver) against a
+// homography model to reject planar/panoramic degeneracies.
+//
+// When the epipolar model wins, the geometry has the UNCALIBRATED configuration
+// with `E` and `F` set, and the estimated camera in whichever of
+// `camera1`/`camera2` is the uncalibrated image; the other stays unset, its
+// intrinsics being an input rather than an estimate.
+//
+// Exactly one of `camera1`/`camera2` must have `has_prior_focal_length` set,
+// and the uncalibrated one must use a pinhole projection. A single isotropic
+// focal is recovered; multi-focal models are seeded fx = fy = f and refined
+// later. Distortion on the uncalibrated side is absorbed by the epipolar fit,
+// as in the fundamental-matrix path; on the calibrated side it is undone
+// exactly.
+//
+// @param camera1         Camera of first image.
+// @param points1         Feature points in first image.
+// @param camera2         Camera of second image.
+// @param points2         Feature points in second image.
+// @param matches         Feature matches between first and second image.
+// @param options         Two-view geometry estimation options.
+TwoViewGeometry EstimateOneSidedFocalTwoViewGeometry(
+    const Camera& camera1,
+    const std::vector<Eigen::Vector2d>& points1,
+    const Camera& camera2,
     const std::vector<Eigen::Vector2d>& points2,
     const FeatureMatches& matches,
     const TwoViewGeometryOptions& options);

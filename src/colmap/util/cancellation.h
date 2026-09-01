@@ -27,33 +27,46 @@
 // ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 // POSSIBILITY OF SUCH DAMAGE.
 
-#include "colmap/estimators/cost_functions/sampson_error.h"
+#pragma once
 
-#include <gtest/gtest.h>
+#include <atomic>
+#include <csignal>
 
 namespace colmap {
-namespace {
 
-TEST(SampsonErrorCostFunctor, Nominal) {
-  std::unique_ptr<ceres::CostFunction> cost_function(
-      SampsonErrorCostFunctor::Create(Eigen::Vector2d(0, 0),
-                                      Eigen::Vector2d(0, 0)));
-  double cam_from_world[7] = {0, 0, 0, 1, 0, 1, 0};
-  double residuals[1];
-  const double* parameters[1] = {cam_from_world};
-  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
-  EXPECT_EQ(residuals[0], 0);
+// Thread-safe cancellation state for cooperative cancellation of long-running
+// operations. Cancellation tokens are single-use and remain cancelled once a
+// cancellation request has been made.
+class CancellationToken {
+ public:
+  void Cancel();
+  bool IsCancelled() const;
 
-  cost_function.reset(SampsonErrorCostFunctor::Create(Eigen::Vector2d(0, 0),
-                                                      Eigen::Vector2d(1, 0)));
-  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
-  EXPECT_NEAR(residuals[0] * residuals[0], 0.5, 1e-6);
+ private:
+  std::atomic<bool> is_cancelled_{false};
+};
 
-  cost_function.reset(SampsonErrorCostFunctor::Create(Eigen::Vector2d(0, 0),
-                                                      Eigen::Vector2d(1, 1)));
-  EXPECT_TRUE(cost_function->Evaluate(parameters, residuals, nullptr));
-  EXPECT_NEAR(residuals[0] * residuals[0], 0.5, 1e-6);
-}
+// Scoped handler for process interruption signals. The handler only records
+// the first signal so that normal code can perform cleanup at a safe point. A
+// second signal terminates the process immediately.
+class ScopedSignalHandler {
+ public:
+  ScopedSignalHandler();
+  ~ScopedSignalHandler();
 
-}  // namespace
+  ScopedSignalHandler(const ScopedSignalHandler&) = delete;
+  ScopedSignalHandler& operator=(const ScopedSignalHandler&) = delete;
+
+  int ReceivedSignal() const;
+  int GetExitCode() const;
+
+  static bool IsInterruptRequested();
+
+ private:
+  using SignalHandler = void (*)(int);
+
+  SignalHandler previous_sigint_handler_ = SIG_DFL;
+  SignalHandler previous_sigterm_handler_ = SIG_DFL;
+};
+
 }  // namespace colmap

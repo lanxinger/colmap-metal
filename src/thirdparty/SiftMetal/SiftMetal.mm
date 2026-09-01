@@ -339,11 +339,11 @@ class SiftMetalMatcherImpl {
  public:
   bool Init();
   bool Match(const uint8_t* descriptors1, int num_descriptors1,
-             const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
-             int num_descriptors2, const MatchKeypoint* keypoints2,
+             const void* keypoints1, const uint8_t* descriptors2,
+             int num_descriptors2, const void* keypoints2,
              const MatchOptions& options,
              MatchGuidedGeometry guided_geometry,
-             const float matrix[9], float max_residual,
+             size_t keypoint_stride, const float matrix[9], float max_residual,
              std::vector<MatchResult>* matches);
 
  private:
@@ -363,8 +363,9 @@ class SiftMetalMatcherImpl {
   id<MTLBuffer> GetDescriptorBuffer(const uint8_t* descriptors,
                                     int num_descriptors);
   id<MTLBuffer> GetKeypointBuffer(bool first_buffer,
-                                  const MatchKeypoint* keypoints,
-                                  int num_keypoints);
+                                  const void* keypoints,
+                                  int num_keypoints,
+                                  size_t keypoint_stride);
   void EvictDescriptorBuffers();
 
   struct DescriptorBufferCacheEntry {
@@ -406,6 +407,18 @@ bool SiftMetalMatcherImpl::Init() {
                 "Match keypoint x offset mismatch");
   static_assert(offsetof(MatchKeypoint, y) == offsetof(SIFTMatcherKeypoint, y),
                 "Match keypoint y offset mismatch");
+  static_assert(sizeof(MatchCamRayWithJac) ==
+                    sizeof(SIFTMatcherCamRayWithJac),
+                "Match bearing-plus-Jacobian ABI mismatch");
+  static_assert(offsetof(MatchCamRayWithJac, x) ==
+                    offsetof(SIFTMatcherCamRayWithJac, x),
+                "Match bearing x offset mismatch");
+  static_assert(offsetof(MatchCamRayWithJac, jacobian_col0_x) ==
+                    offsetof(SIFTMatcherCamRayWithJac, jacobian_col0_x),
+                "Match Jacobian column 0 offset mismatch");
+  static_assert(offsetof(MatchCamRayWithJac, jacobian_col1_z) ==
+                    offsetof(SIFTMatcherCamRayWithJac, jacobian_col1_z),
+                "Match Jacobian column 1 offset mismatch");
 
   device_ = MTLCreateSystemDefaultDevice();
   if (!device_) return false;
@@ -436,7 +449,7 @@ bool SiftMetalMatcherImpl::Init() {
   siftMatchBestPipeline_ = MakePipeline(device_, library_, "siftMatchBest");
   siftMatchBestDotParallelPipeline_ =
       MakePipeline(device_, library_, "siftMatchBestDotParallel");
-  const SIFTMatcherKeypoint dummy_keypoint = {0.0f, 0.0f};
+  const SIFTMatcherCamRayWithJac dummy_keypoint = {};
   dummyKeypointBuffer_ =
       [device_ newBufferWithBytes:&dummy_keypoint
                            length:sizeof(dummy_keypoint)
@@ -526,7 +539,10 @@ void SiftMetalMatcherImpl::EvictDescriptorBuffers() {
 }
 
 id<MTLBuffer> SiftMetalMatcherImpl::GetKeypointBuffer(
-    bool first_buffer, const MatchKeypoint* keypoints, int num_keypoints) {
+    bool first_buffer,
+    const void* keypoints,
+    int num_keypoints,
+    size_t keypoint_stride) {
   if (!keypoints || num_keypoints <= 0) {
     return nil;
   }
@@ -536,7 +552,7 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetKeypointBuffer(
   size_t capacity =
       first_buffer ? keypoints1BufferCapacity_ : keypoints2BufferCapacity_;
   const size_t keypoint_bytes =
-      static_cast<size_t>(num_keypoints) * sizeof(SIFTMatcherKeypoint);
+      static_cast<size_t>(num_keypoints) * keypoint_stride;
   if (!buffer || capacity < keypoint_bytes) {
     buffer = [device_ newBufferWithLength:keypoint_bytes
                                   options:MTLResourceStorageModeShared];
@@ -620,6 +636,10 @@ bool SiftMetalMatcherImpl::EncodeOneWay(
   [encoder setBuffer:keypoints2Buffer offset:0 atIndex:3];
   [encoder setBuffer:dir.paramsBuffer offset:0 atIndex:4];
   [encoder setBuffer:dir.resultsBuffer offset:0 atIndex:5];
+  if (guided) {
+    [encoder setBuffer:keypoints1Buffer offset:0 atIndex:6];
+    [encoder setBuffer:keypoints2Buffer offset:0 atIndex:7];
+  }
   // Both kernels use the blocked threadgroup structure: one group per
   // SIFT_MATCHER_DOT_BLOCK query descriptors.
   const NSUInteger threadsPerThreadgroup = std::min<NSUInteger>(
@@ -635,15 +655,16 @@ bool SiftMetalMatcherImpl::EncodeOneWay(
 
 bool SiftMetalMatcherImpl::Match(
     const uint8_t* descriptors1, int num_descriptors1,
-    const MatchKeypoint* keypoints1, const uint8_t* descriptors2,
-    int num_descriptors2, const MatchKeypoint* keypoints2,
+    const void* keypoints1, const uint8_t* descriptors2,
+    int num_descriptors2, const void* keypoints2,
     const MatchOptions& options, MatchGuidedGeometry guided_geometry,
-    const float matrix[9], float max_residual,
+    size_t keypoint_stride, const float matrix[9], float max_residual,
     std::vector<MatchResult>* matches) {
   const bool valid_guided_geometry =
       guided_geometry == MatchGuidedGeometry::NONE ||
       guided_geometry == MatchGuidedGeometry::EPIPOLAR ||
-      guided_geometry == MatchGuidedGeometry::HOMOGRAPHY;
+      guided_geometry == MatchGuidedGeometry::HOMOGRAPHY ||
+      guided_geometry == MatchGuidedGeometry::TANGENT_EPIPOLAR;
   if (!matches) {
     return false;
   }
@@ -656,7 +677,12 @@ bool SiftMetalMatcherImpl::Match(
       !std::isfinite(options.max_distance) || options.max_ratio <= 0.0f ||
       options.max_distance <= 0.0f ||
       (guided_geometry != MatchGuidedGeometry::NONE &&
-       (!matrix || !std::isfinite(max_residual) || max_residual < 0.0f))) {
+       (!matrix || !std::isfinite(max_residual) || max_residual < 0.0f)) ||
+      (guided_geometry == MatchGuidedGeometry::TANGENT_EPIPOLAR &&
+       keypoint_stride != sizeof(MatchCamRayWithJac)) ||
+      (guided_geometry != MatchGuidedGeometry::NONE &&
+       guided_geometry != MatchGuidedGeometry::TANGENT_EPIPOLAR &&
+       keypoint_stride != sizeof(MatchKeypoint))) {
     return false;
   }
   if (guided_geometry != MatchGuidedGeometry::NONE) {
@@ -690,9 +716,15 @@ bool SiftMetalMatcherImpl::Match(
   id<MTLBuffer> keypoints2Buffer = dummyKeypointBuffer_;
   if (guided_geometry != MatchGuidedGeometry::NONE) {
     keypoints1Buffer =
-        GetKeypointBuffer(/*first_buffer=*/true, keypoints1, num_descriptors1);
+        GetKeypointBuffer(/*first_buffer=*/true,
+                          keypoints1,
+                          num_descriptors1,
+                          keypoint_stride);
     keypoints2Buffer =
-        GetKeypointBuffer(/*first_buffer=*/false, keypoints2, num_descriptors2);
+        GetKeypointBuffer(/*first_buffer=*/false,
+                          keypoints2,
+                          num_descriptors2,
+                          keypoint_stride);
   }
   if (!keypoints1Buffer || !keypoints2Buffer) {
     return false;
@@ -1926,6 +1958,7 @@ bool SiftMetalMatcher::Match(const uint8_t* descriptors1,
                       nullptr,
                       options,
                       MatchGuidedGeometry::NONE,
+                      /*keypoint_stride=*/0,
                       nullptr,
                       0.0f,
                       matches);
@@ -1950,7 +1983,33 @@ bool SiftMetalMatcher::MatchGuided(const uint8_t* descriptors1,
                       keypoints2,
                       options,
                       guided_geometry,
+                      sizeof(MatchKeypoint),
                       matrix,
+                      max_residual,
+                      matches);
+}
+
+bool SiftMetalMatcher::MatchGuidedTangent(
+    const uint8_t* descriptors1,
+    int num_descriptors1,
+    const MatchCamRayWithJac* cam_rays1,
+    const uint8_t* descriptors2,
+    int num_descriptors2,
+    const MatchCamRayWithJac* cam_rays2,
+    const MatchOptions& options,
+    const float essential_matrix[9],
+    float max_residual,
+    std::vector<MatchResult>* matches) {
+  return impl_->Match(descriptors1,
+                      num_descriptors1,
+                      cam_rays1,
+                      descriptors2,
+                      num_descriptors2,
+                      cam_rays2,
+                      options,
+                      MatchGuidedGeometry::TANGENT_EPIPOLAR,
+                      sizeof(MatchCamRayWithJac),
+                      essential_matrix,
                       max_residual,
                       matches);
 }

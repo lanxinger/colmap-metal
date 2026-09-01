@@ -30,6 +30,7 @@
 #include "colmap/feature/sift.h"
 
 #include "colmap/feature/utils.h"
+#include "colmap/geometry/essential_matrix.h"
 #include "colmap/math/math.h"
 #include "colmap/util/cuda.h"
 #include "colmap/util/file.h"
@@ -1106,20 +1107,17 @@ enum class DistanceType {
   DOT_PRODUCT,
 };
 
+// Computes the pairwise descriptor distance matrix. When `guided_filter` is
+// given, it is called with the pair of descriptor indices and returns whether
+// the pair should be rejected on geometric grounds; rejected pairs get the
+// worst possible distance. Passing indices rather than keypoint coordinates
+// lets the caller filter on whatever geometry it needs - pixels, bearings, or
+// bearings plus their Jacobians - without this function knowing any of it.
 Eigen::RowMajorMatrixXf ComputeSiftDistanceMatrix(
     const DistanceType distance_type,
-    const FeatureKeypoints* keypoints1,
-    const FeatureKeypoints* keypoints2,
     const FeatureDescriptorsData& descriptors1,
     const FeatureDescriptorsData& descriptors2,
-    const std::function<bool(float, float, float, float)>& guided_filter) {
-  if (guided_filter != nullptr) {
-    THROW_CHECK_NOTNULL(keypoints1);
-    THROW_CHECK_NOTNULL(keypoints2);
-    THROW_CHECK_EQ(keypoints1->size(), descriptors1.rows());
-    THROW_CHECK_EQ(keypoints2->size(), descriptors2.rows());
-  }
-
+    const std::function<bool(Eigen::Index, Eigen::Index)>& guided_filter) {
   const Eigen::Matrix<int, Eigen::Dynamic, kSiftDescriptorDim>
       descriptors1_int = descriptors1.cast<int>();
   const Eigen::Matrix<int, Eigen::Dynamic, kSiftDescriptorDim>
@@ -1128,10 +1126,7 @@ Eigen::RowMajorMatrixXf ComputeSiftDistanceMatrix(
   Eigen::RowMajorMatrixXf distances(descriptors1.rows(), descriptors2.rows());
   for (Eigen::Index i1 = 0; i1 < descriptors1.rows(); ++i1) {
     for (Eigen::Index i2 = 0; i2 < descriptors2.rows(); ++i2) {
-      if (guided_filter != nullptr && guided_filter((*keypoints1)[i1].x,
-                                                    (*keypoints1)[i1].y,
-                                                    (*keypoints2)[i2].x,
-                                                    (*keypoints2)[i2].y)) {
+      if (guided_filter != nullptr && guided_filter(i1, i2)) {
         if (distance_type == DistanceType::L2) {
           distances(i1, i2) = kSqSiftDescriptorNorm;
         } else if (distance_type == DistanceType::DOT_PRODUCT) {
@@ -1157,29 +1152,217 @@ Eigen::RowMajorMatrixXf ComputeSiftDistanceMatrix(
   return distances;
 }
 
-FeatureKeypoints NormalizeFeatureKeypoints(const Camera& camera,
-                                           const FeatureKeypoints& keypoints) {
-  FeatureKeypoints normalized_keypoints(keypoints.size());
-  for (size_t i = 0; i < keypoints.size(); ++i) {
-    const FeatureKeypoint& keypoint = keypoints[i];
-    if (const auto cam_point =
-            camera.CamFromImg(Eigen::Vector2d(keypoint.x, keypoint.y))) {
-      normalized_keypoints[i] = FeatureKeypoint(cam_point->x(), cam_point->y());
-    } else {
-      // Set to large values to ensure that associated matches are rejected.
-      normalized_keypoints[i] = FeatureKeypoint(1e6f, 1e6f);
-    }
+Eigen::Matrix3d RayHomographyForGuidedMatching(
+    const Eigen::Matrix3d& stored_homography,
+    const Camera& camera1,
+    const Camera& camera2) {
+  if (camera1.IsSpherical() || camera2.IsSpherical()) {
+    return stored_homography;
   }
-  return normalized_keypoints;
+  return camera2.CalibrationMatrix().inverse() * stored_homography *
+         camera1.CalibrationMatrix();
 }
 
-double ComputeNormalizedGuidedMatchingMaxResidual(const Camera& camera1,
-                                                  const Camera& camera2,
-                                                  const double max_error) {
-  const double normalized_max_error1 = camera1.CamFromImgThreshold(max_error);
-  const double normalized_max_error2 = camera2.CamFromImgThreshold(max_error);
-  return 0.5 * (normalized_max_error1 * normalized_max_error1 +
-                normalized_max_error2 * normalized_max_error2);
+// Ray homographies are stored directly for spherical pairs and conjugated into
+// a virtual pinhole image for calibrated distorted pairs. Only fresh estimator
+// output carries transient provenance; database-loaded and manually constructed
+// geometries default to UNKNOWN and retain the backwards-compatible pixel path.
+bool UseRayHomographyForGuidedMatching(const TwoViewGeometry& geometry) {
+  return geometry.H_estimation_space ==
+         TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
+}
+
+// The CUDA/GLSL and Metal homography kernels consume raw pixel coordinates and
+// cannot project an arbitrary camera ray. Keep their fast path for ordinary
+// pixel homographies, but use this common CPU path for the rare ray-homography
+// cases so every backend has the same correct behavior without widening either
+// GPU ABI.
+void MatchGuidedSiftFeaturesWithRayHomography(
+    const double max_error,
+    const Camera& camera1,
+    const FeatureKeypoints& keypoints1,
+    const FeatureDescriptorsData& descriptors1,
+    const Camera& camera2,
+    const FeatureKeypoints& keypoints2,
+    const FeatureDescriptorsData& descriptors2,
+    const Eigen::Matrix3d& ray_homography,
+    const SiftMatchingOptions& options,
+    const int max_num_features,
+    const int max_num_matches,
+    FeatureMatches* matches) {
+  THROW_CHECK_NOTNULL(matches);
+  matches->clear();
+  THROW_CHECK_EQ(keypoints1.size(), descriptors1.rows());
+  THROW_CHECK_EQ(keypoints2.size(), descriptors2.rows());
+  if (max_num_features <= 0 || max_num_matches <= 0) {
+    return;
+  }
+  const Eigen::Index num_features1 =
+      std::min<Eigen::Index>(descriptors1.rows(), max_num_features);
+  const Eigen::Index num_features2 =
+      std::min<Eigen::Index>(descriptors2.rows(), max_num_features);
+  if (num_features1 == 0 || num_features2 == 0 || !ray_homography.allFinite()) {
+    return;
+  }
+
+  std::vector<std::optional<Eigen::Vector2d>> transferred_points1(
+      num_features1);
+  for (Eigen::Index i = 0; i < num_features1; ++i) {
+    const FeatureKeypoint& keypoint = keypoints1[i];
+    const std::optional<Eigen::Vector3d> ray =
+        camera1.CamRayFromImg(Eigen::Vector2d(keypoint.x, keypoint.y));
+    if (ray.has_value()) {
+      transferred_points1[i] = camera2.ImgFromCam(ray_homography * *ray);
+    }
+  }
+
+  const double max_residual = max_error * max_error;
+  const bool wrap_horizontal = camera2.IsSpherical();
+  const double image_width = static_cast<double>(camera2.width);
+
+  // Scan descriptor pairs once and retain only the two best candidates in each
+  // direction. Geometrically rejected pairs retain the existing maximum-
+  // descriptor-distance sentinel so custom ratio/distance settings behave
+  // exactly as in the dense path. Materializing the full distance, transpose,
+  // and index matrices costs about 16 bytes per pair (1 GiB at 8192 x 8192),
+  // while this keeps memory linear in the feature count.
+  const Eigen::Matrix<int, Eigen::Dynamic, kSiftDescriptorDim>
+      descriptors1_int = descriptors1.topRows(num_features1).cast<int>();
+  const Eigen::Matrix<int, Eigen::Dynamic, kSiftDescriptorDim>
+      descriptors2_int = descriptors2.topRows(num_features2).cast<int>();
+  const float initial_distance = std::numeric_limits<float>::max();
+  const float rejected_distance = static_cast<float>(kSqSiftDescriptorNorm);
+  std::vector<int> best_indices_1to2(num_features1, -1);
+  std::vector<float> best_dists_1to2(num_features1, initial_distance);
+  std::vector<float> second_best_dists_1to2(num_features1, initial_distance);
+  std::vector<int> best_indices_2to1(options.cross_check ? num_features2 : 0,
+                                     -1);
+  std::vector<float> best_dists_2to1(options.cross_check ? num_features2 : 0,
+                                     initial_distance);
+  std::vector<float> second_best_dists_2to1(
+      options.cross_check ? num_features2 : 0, initial_distance);
+
+  auto update_best = [](const int candidate_idx,
+                        const float distance,
+                        int* best_idx,
+                        float* best_distance,
+                        float* second_best_distance) {
+    if (distance < *best_distance) {
+      *best_idx = candidate_idx;
+      *second_best_distance = *best_distance;
+      *best_distance = distance;
+    } else if (distance < *second_best_distance) {
+      *second_best_distance = distance;
+    }
+  };
+
+  for (Eigen::Index i1 = 0; i1 < num_features1; ++i1) {
+    const std::optional<Eigen::Vector2d>& transferred_point =
+        transferred_points1[i1];
+    for (Eigen::Index i2 = 0; i2 < num_features2; ++i2) {
+      bool is_geometry_valid =
+          transferred_point.has_value() && transferred_point->allFinite();
+      if (is_geometry_valid) {
+        const FeatureKeypoint& keypoint2 = keypoints2[i2];
+        Eigen::Vector2d error =
+            *transferred_point - Eigen::Vector2d(keypoint2.x, keypoint2.y);
+        if (wrap_horizontal) {
+          error.x() -= image_width * std::round(error.x() / image_width);
+        }
+        is_geometry_valid = error.squaredNorm() <= max_residual;
+      }
+      const float distance =
+          is_geometry_valid ? static_cast<float>((descriptors1_int.row(i1) -
+                                                  descriptors2_int.row(i2))
+                                                     .squaredNorm())
+                            : rejected_distance;
+      update_best(static_cast<int>(i2),
+                  distance,
+                  &best_indices_1to2[i1],
+                  &best_dists_1to2[i1],
+                  &second_best_dists_1to2[i1]);
+      if (options.cross_check) {
+        update_best(static_cast<int>(i1),
+                    distance,
+                    &best_indices_2to1[i2],
+                    &best_dists_2to1[i2],
+                    &second_best_dists_2to1[i2]);
+      }
+    }
+  }
+
+  const float max_ratio = static_cast<float>(options.max_ratio);
+  const float max_distance = static_cast<float>(options.max_distance);
+  const float max_l2_dist = kSqSiftDescriptorNorm * max_distance * max_distance;
+  auto passes_thresholds =
+      [&](const size_t idx,
+          const std::vector<int>& best_indices,
+          const std::vector<float>& best_distances,
+          const std::vector<float>& second_best_distances) {
+        return best_indices[idx] != -1 && best_distances[idx] <= max_l2_dist &&
+               std::sqrt(best_distances[idx]) <
+                   max_ratio * std::sqrt(second_best_distances[idx]);
+      };
+
+  matches->reserve(static_cast<size_t>(
+      std::min<Eigen::Index>(num_features1, max_num_matches)));
+  for (size_t i1 = 0; i1 < static_cast<size_t>(num_features1); ++i1) {
+    if (!passes_thresholds(
+            i1, best_indices_1to2, best_dists_1to2, second_best_dists_1to2)) {
+      continue;
+    }
+    const int i2 = best_indices_1to2[i1];
+    if (options.cross_check &&
+        (!passes_thresholds(
+             i2, best_indices_2to1, best_dists_2to1, second_best_dists_2to1) ||
+         best_indices_2to1[i2] != static_cast<int>(i1))) {
+      continue;
+    }
+    matches->push_back(
+        FeatureMatch{static_cast<point2D_t>(i1), static_cast<point2D_t>(i2)});
+    if (matches->size() == static_cast<size_t>(max_num_matches)) {
+      break;
+    }
+  }
+}
+
+// Unit bearing vectors and their pixel Jacobians for a set of keypoints,
+// together with a validity mask.
+//
+// Keypoints that cannot be unprojected - back-hemisphere pixels of an
+// omnidirectional camera have no normalized image plane representation, and
+// iterative undistortion can fail - are marked invalid and must be excluded
+// from matching by the caller. Note that encoding invalidity as an extreme
+// coordinate does *not* work: the Sampson error is a ratio whose numerator and
+// denominator scale together, so a point pushed to infinity along a direction d
+// converges to the finite distance between its partner and the epipolar line of
+// d, which admits rather than rejects partners lying near that one line.
+struct CamRaysWithJac {
+  std::vector<Eigen::Vector3d> rays;
+  std::vector<Eigen::Matrix3x2d> jacobians;
+  std::vector<bool> valid;
+};
+
+CamRaysWithJac ComputeCamRaysWithJac(const Camera& camera,
+                                     const FeatureKeypoints& keypoints) {
+  CamRaysWithJac cam_rays;
+  cam_rays.rays.resize(keypoints.size());
+  cam_rays.jacobians.resize(keypoints.size());
+  cam_rays.valid.resize(keypoints.size());
+  for (size_t i = 0; i < keypoints.size(); ++i) {
+    const FeatureKeypoint& keypoint = keypoints[i];
+    if (const auto ray_and_jac = camera.CamRayFromImgWithJac(
+            Eigen::Vector2d(keypoint.x, keypoint.y))) {
+      cam_rays.rays[i] = ray_and_jac->ray;
+      cam_rays.jacobians[i] = ray_and_jac->jacobian;
+      cam_rays.valid[i] = true;
+    } else {
+      cam_rays.rays[i].setZero();
+      cam_rays.jacobians[i].setZero();
+      cam_rays.valid[i] = false;
+    }
+  }
+  return cam_rays;
 }
 
 // Selects the epipolar model used to guide matching. The essential matrix is
@@ -1246,8 +1429,6 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
     if (options_.sift->cpu_brute_force_matcher) {
       const Eigen::RowMajorMatrixXf dot_products =
           ComputeSiftDistanceMatrix(DistanceType::DOT_PRODUCT,
-                                    nullptr,
-                                    nullptr,
                                     image1.descriptors->data,
                                     image2.descriptors->data,
                                     nullptr);
@@ -1327,66 +1508,104 @@ class SiftCPUFeatureMatcher : public FeatureMatcher {
     const Camera& effective_camera2 = two_view_geometry->camera2.has_value()
                                           ? *two_view_geometry->camera2
                                           : *image2.camera;
-    const FeatureKeypoints normalized_keypoints1 =
-        use_essential_matrix
-            ? NormalizeFeatureKeypoints(effective_camera1, *image1.keypoints)
-            : FeatureKeypoints();
-    const FeatureKeypoints normalized_keypoints2 =
-        use_essential_matrix
-            ? NormalizeFeatureKeypoints(effective_camera2, *image2.keypoints)
-            : FeatureKeypoints();
+    if (use_homography &&
+        UseRayHomographyForGuidedMatching(*two_view_geometry)) {
+      MatchGuidedSiftFeaturesWithRayHomography(
+          max_error,
+          effective_camera1,
+          *image1.keypoints,
+          image1.descriptors->data,
+          effective_camera2,
+          *image2.keypoints,
+          image2.descriptors->data,
+          RayHomographyForGuidedMatching(
+              *two_view_geometry->H, effective_camera1, effective_camera2),
+          *options_.sift,
+          std::numeric_limits<int>::max(),
+          std::numeric_limits<int>::max(),
+          &two_view_geometry->inlier_matches);
+      return;
+    }
 
-    const Eigen::Matrix3f E_or_F =
+    // The essential matrix path scores in pixels with the tangent Sampson
+    // error, matching the two-view verification that produced E. Bearings are
+    // used rather than normalized image plane coordinates so that the filter is
+    // defined for every central camera model, including omnidirectional ones
+    // whose back hemisphere has no image plane representation at all.
+    const CamRaysWithJac cam_rays1 =
         use_essential_matrix
-            ? Eigen::Matrix3f(two_view_geometry->E->cast<float>())
-        : use_fundamental_matrix
+            ? ComputeCamRaysWithJac(effective_camera1, *image1.keypoints)
+            : CamRaysWithJac();
+    const CamRaysWithJac cam_rays2 =
+        use_essential_matrix
+            ? ComputeCamRaysWithJac(effective_camera2, *image2.keypoints)
+            : CamRaysWithJac();
+
+    const Eigen::Matrix3d E =
+        use_essential_matrix ? *two_view_geometry->E : Eigen::Matrix3d::Zero();
+    const Eigen::Matrix3f F =
+        use_fundamental_matrix
             ? Eigen::Matrix3f(two_view_geometry->F->cast<float>())
             : Eigen::Matrix3f::Zero();
     const Eigen::Matrix3f H =
         use_homography ? Eigen::Matrix3f(two_view_geometry->H->cast<float>())
                        : Eigen::Matrix3f::Zero();
 
-    const float max_residual =
-        use_essential_matrix
-            ? static_cast<float>(ComputeNormalizedGuidedMatchingMaxResidual(
-                  effective_camera1, effective_camera2, max_error))
-            : static_cast<float>(max_error * max_error);
+    // Both thresholds must outlive the lambdas below, which capture by
+    // reference and are invoked after this scope's inner blocks have exited.
+    const double max_residual_double = max_error * max_error;
+    const float max_residual = static_cast<float>(max_residual_double);
 
-    std::function<bool(float, float, float, float)> guided_filter;
-    if (use_essential_matrix || use_fundamental_matrix) {
-      guided_filter =
-          [&](const float x1, const float y1, const float x2, const float y2) {
-            const Eigen::Vector3f p1(x1, y1, 1.0f);
-            const Eigen::Vector3f p2(x2, y2, 1.0f);
-            const Eigen::Vector3f epipolar_line1 = E_or_F * p1;
-            const Eigen::Vector3f epipolar_line2 = E_or_F.transpose() * p2;
-            const float nom = p2.transpose() * epipolar_line1;
-            const float denom_sq = epipolar_line1(0) * epipolar_line1(0) +
-                                   epipolar_line1(1) * epipolar_line1(1) +
-                                   epipolar_line2(0) * epipolar_line2(0) +
-                                   epipolar_line2(1) * epipolar_line2(1);
-            return nom * nom > max_residual * denom_sq;
-          };
+    std::function<bool(Eigen::Index, Eigen::Index)> guided_filter;
+    if (use_essential_matrix) {
+      guided_filter = [&](const Eigen::Index i1, const Eigen::Index i2) {
+        if (!cam_rays1.valid[i1] || !cam_rays2.valid[i2]) {
+          return true;
+        }
+        return ComputeSquaredTangentSampsonError(cam_rays1.rays[i1],
+                                                 cam_rays1.jacobians[i1],
+                                                 cam_rays2.rays[i2],
+                                                 cam_rays2.jacobians[i2],
+                                                 E) > max_residual_double;
+      };
+    } else if (use_fundamental_matrix) {
+      guided_filter = [&](const Eigen::Index i1, const Eigen::Index i2) {
+        const auto& keypoint1 = (*image1.keypoints)[i1];
+        const auto& keypoint2 = (*image2.keypoints)[i2];
+        const Eigen::Vector3f p1(keypoint1.x, keypoint1.y, 1.0f);
+        const Eigen::Vector3f p2(keypoint2.x, keypoint2.y, 1.0f);
+        const Eigen::Vector3f epipolar_line1 = F * p1;
+        const Eigen::Vector3f epipolar_line2 = F.transpose() * p2;
+        const float nom = p2.transpose() * epipolar_line1;
+        const float denom_sq = epipolar_line1(0) * epipolar_line1(0) +
+                               epipolar_line1(1) * epipolar_line1(1) +
+                               epipolar_line2(0) * epipolar_line2(0) +
+                               epipolar_line2(1) * epipolar_line2(1);
+        return nom * nom > max_residual * denom_sq;
+      };
     } else if (use_homography) {
-      guided_filter =
-          [&](const float x1, const float y1, const float x2, const float y2) {
-            const Eigen::Vector3f p1(x1, y1, 1.0f);
-            const Eigen::Vector2f p2(x2, y2);
-            return ((H * p1).hnormalized() - p2).squaredNorm() > max_residual;
-          };
+      guided_filter = [&](const Eigen::Index i1, const Eigen::Index i2) {
+        const auto& keypoint1 = (*image1.keypoints)[i1];
+        const auto& keypoint2 = (*image2.keypoints)[i2];
+        const Eigen::Vector3f p1(keypoint1.x, keypoint1.y, 1.0f);
+        const Eigen::Vector2f p2(keypoint2.x, keypoint2.y);
+        return ((H * p1).hnormalized() - p2).squaredNorm() > max_residual;
+      };
     } else {
       return;
     }
 
     THROW_CHECK(guided_filter);
+    // The guided filter indexes per-feature geometry (bearings with Jacobians,
+    // or the keypoints themselves) by descriptor row, so the two must align.
+    THROW_CHECK_EQ(image1.keypoints->size(), image1.descriptors->data.rows());
+    THROW_CHECK_EQ(image2.keypoints->size(), image2.descriptors->data.rows());
 
-    const Eigen::RowMajorMatrixXf l2_dists_1to2 = ComputeSiftDistanceMatrix(
-        DistanceType::L2,
-        use_essential_matrix ? &normalized_keypoints1 : image1.keypoints.get(),
-        use_essential_matrix ? &normalized_keypoints2 : image2.keypoints.get(),
-        image1.descriptors->data,
-        image2.descriptors->data,
-        guided_filter);
+    const Eigen::RowMajorMatrixXf l2_dists_1to2 =
+        ComputeSiftDistanceMatrix(DistanceType::L2,
+                                  image1.descriptors->data,
+                                  image2.descriptors->data,
+                                  guided_filter);
     const Eigen::RowMajorMatrixXf l2_dists_2to1 = l2_dists_1to2.transpose();
 
     Eigen::RowMajorMatrixXi indices_1to2(l2_dists_1to2.rows(),
@@ -1428,6 +1647,32 @@ void ToMetalMatchKeypoints(
   metal_keypoints->resize(keypoints.size());
   for (size_t i = 0; i < keypoints.size(); ++i) {
     (*metal_keypoints)[i] = {keypoints[i].x, keypoints[i].y};
+  }
+}
+
+void ToMetalMatchCamRaysWithJac(
+    const Camera& camera,
+    const FeatureKeypoints& keypoints,
+    std::vector<sift_metal::MatchCamRayWithJac>* metal_cam_rays) {
+  THROW_CHECK_NOTNULL(metal_cam_rays);
+  metal_cam_rays->assign(keypoints.size(), sift_metal::MatchCamRayWithJac{});
+  for (size_t i = 0; i < keypoints.size(); ++i) {
+    const FeatureKeypoint& keypoint = keypoints[i];
+    const auto ray_with_jac =
+        camera.CamRayFromImgWithJac(Eigen::Vector2d(keypoint.x, keypoint.y));
+    if (!ray_with_jac.has_value()) {
+      continue;
+    }
+    sift_metal::MatchCamRayWithJac& output = (*metal_cam_rays)[i];
+    output.x = static_cast<float>(ray_with_jac->ray.x());
+    output.y = static_cast<float>(ray_with_jac->ray.y());
+    output.z = static_cast<float>(ray_with_jac->ray.z());
+    output.jacobian_col0_x = static_cast<float>(ray_with_jac->jacobian(0, 0));
+    output.jacobian_col0_y = static_cast<float>(ray_with_jac->jacobian(1, 0));
+    output.jacobian_col0_z = static_cast<float>(ray_with_jac->jacobian(2, 0));
+    output.jacobian_col1_x = static_cast<float>(ray_with_jac->jacobian(0, 1));
+    output.jacobian_col1_y = static_cast<float>(ray_with_jac->jacobian(1, 1));
+    output.jacobian_col1_z = static_cast<float>(ray_with_jac->jacobian(2, 1));
   }
 }
 
@@ -1532,6 +1777,24 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     if (!use_essential_matrix && !use_fundamental_matrix && !use_homography) {
       return;
     }
+    if (use_homography &&
+        UseRayHomographyForGuidedMatching(*two_view_geometry)) {
+      MatchGuidedSiftFeaturesWithRayHomography(
+          max_error,
+          effective_camera1,
+          *image1.keypoints,
+          image1.descriptors->data,
+          effective_camera2,
+          *image2.keypoints,
+          image2.descriptors->data,
+          RayHomographyForGuidedMatching(
+              *two_view_geometry->H, effective_camera1, effective_camera2),
+          *options_.sift,
+          std::numeric_limits<int>::max(),
+          std::numeric_limits<int>::max(),
+          &two_view_geometry->inlier_matches);
+      return;
+    }
 
     const Eigen::Matrix3f E_or_F =
         use_essential_matrix
@@ -1544,26 +1807,11 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
                        : Eigen::Matrix3f::Zero();
     const Eigen::Matrix3f guided_matrix = use_homography ? H : E_or_F;
 
-    const float max_residual =
-        use_essential_matrix
-            ? static_cast<float>(ComputeNormalizedGuidedMatchingMaxResidual(
-                  effective_camera1, effective_camera2, max_error))
-            : static_cast<float>(max_error * max_error);
+    const float max_residual = static_cast<float>(max_error * max_error);
     if (!guided_matrix.allFinite() || !std::isfinite(max_residual) ||
         max_residual < 0.0f) {
       return;
     }
-
-    const auto& metal_keypoints1 =
-        use_essential_matrix
-            ? GetNormalizedMetalKeypoints(
-                  image1, effective_camera1, &metal_keypoints1_)
-            : GetRawMetalKeypoints(image1, &metal_keypoints1_);
-    const auto& metal_keypoints2 =
-        use_essential_matrix
-            ? GetNormalizedMetalKeypoints(
-                  image2, effective_camera2, &metal_keypoints2_)
-            : GetRawMetalKeypoints(image2, &metal_keypoints2_);
 
     const std::array<float, 9> matrix = ToRowMajorArray(guided_matrix);
 
@@ -1571,20 +1819,43 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
         static_cast<float>(options_.sift->max_ratio),
         static_cast<float>(options_.sift->max_distance),
         options_.sift->cross_check};
-    const sift_metal::MatchGuidedGeometry guided_geometry =
-        use_homography ? sift_metal::MatchGuidedGeometry::HOMOGRAPHY
-                       : sift_metal::MatchGuidedGeometry::EPIPOLAR;
-    if (!matcher_.MatchGuided(image1.descriptors->data.data(),
-                              image1.descriptors->data.rows(),
-                              metal_keypoints1.data(),
-                              image2.descriptors->data.data(),
-                              image2.descriptors->data.rows(),
-                              metal_keypoints2.data(),
-                              match_options,
-                              guided_geometry,
-                              matrix.data(),
-                              max_residual,
-                              &metal_matches_)) {
+    bool matched = false;
+    if (use_essential_matrix) {
+      const auto& cam_rays1 =
+          GetTangentMetalCamRays(image1, effective_camera1, &metal_cam_rays1_);
+      const auto& cam_rays2 =
+          GetTangentMetalCamRays(image2, effective_camera2, &metal_cam_rays2_);
+      matched = matcher_.MatchGuidedTangent(image1.descriptors->data.data(),
+                                            image1.descriptors->data.rows(),
+                                            cam_rays1.data(),
+                                            image2.descriptors->data.data(),
+                                            image2.descriptors->data.rows(),
+                                            cam_rays2.data(),
+                                            match_options,
+                                            matrix.data(),
+                                            max_residual,
+                                            &metal_matches_);
+    } else {
+      const auto& metal_keypoints1 =
+          GetRawMetalKeypoints(image1, &metal_keypoints1_);
+      const auto& metal_keypoints2 =
+          GetRawMetalKeypoints(image2, &metal_keypoints2_);
+      const sift_metal::MatchGuidedGeometry guided_geometry =
+          use_homography ? sift_metal::MatchGuidedGeometry::HOMOGRAPHY
+                         : sift_metal::MatchGuidedGeometry::EPIPOLAR;
+      matched = matcher_.MatchGuided(image1.descriptors->data.data(),
+                                     image1.descriptors->data.rows(),
+                                     metal_keypoints1.data(),
+                                     image2.descriptors->data.data(),
+                                     image2.descriptors->data.rows(),
+                                     metal_keypoints2.data(),
+                                     match_options,
+                                     guided_geometry,
+                                     matrix.data(),
+                                     max_residual,
+                                     &metal_matches_);
+    }
+    if (!matched) {
       LOG(ERROR) << "Metal guided SIFT feature matching failed";
       return;
     }
@@ -1598,6 +1869,14 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     uint64_t keypoints_hash = 0;
     uint64_t camera_hash = 0;
     std::vector<sift_metal::MatchKeypoint> keypoints;
+  };
+
+  struct MetalCamRayCacheEntry {
+    const FeatureKeypoints* source_keypoints = nullptr;
+    size_t num_keypoints = 0;
+    uint64_t keypoints_hash = 0;
+    uint64_t camera_hash = 0;
+    std::vector<sift_metal::MatchCamRayWithJac> cam_rays;
   };
 
   const std::vector<sift_metal::MatchKeypoint>& GetRawMetalKeypoints(
@@ -1622,19 +1901,17 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
     return entry.keypoints;
   }
 
-  const std::vector<sift_metal::MatchKeypoint>& GetNormalizedMetalKeypoints(
+  const std::vector<sift_metal::MatchCamRayWithJac>& GetTangentMetalCamRays(
       const Image& image,
       const Camera& camera,
-      std::vector<sift_metal::MatchKeypoint>* scratch) {
+      std::vector<sift_metal::MatchCamRayWithJac>* scratch) {
     if (image.image_id == kInvalidImageId) {
-      const FeatureKeypoints normalized_keypoints =
-          NormalizeFeatureKeypoints(camera, *image.keypoints);
-      ToMetalMatchKeypoints(normalized_keypoints, scratch);
+      ToMetalMatchCamRaysWithJac(camera, *image.keypoints, scratch);
       return *scratch;
     }
 
-    MetalKeypointCacheEntry& entry =
-        normalized_metal_keypoint_cache_[image.image_id];
+    MetalCamRayCacheEntry& entry =
+        tangent_metal_keypoint_cache_[image.image_id];
     const FeatureKeypoints* keypoints = image.keypoints.get();
     const uint64_t keypoints_hash = HashFeatureKeypoints(*keypoints);
     const uint64_t camera_hash = HashCameraForNormalization(camera);
@@ -1642,15 +1919,13 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
         entry.num_keypoints != keypoints->size() ||
         entry.keypoints_hash != keypoints_hash ||
         entry.camera_hash != camera_hash) {
-      const FeatureKeypoints normalized_keypoints =
-          NormalizeFeatureKeypoints(camera, *image.keypoints);
-      ToMetalMatchKeypoints(normalized_keypoints, &entry.keypoints);
+      ToMetalMatchCamRaysWithJac(camera, *image.keypoints, &entry.cam_rays);
       entry.source_keypoints = keypoints;
       entry.num_keypoints = keypoints->size();
       entry.keypoints_hash = keypoints_hash;
       entry.camera_hash = camera_hash;
     }
-    return entry.keypoints;
+    return entry.cam_rays;
   }
 
   const FeatureMatchingOptions options_;
@@ -1658,12 +1933,43 @@ class SiftMetalFeatureMatcher : public FeatureMatcher {
   std::vector<sift_metal::MatchResult> metal_matches_;
   std::vector<sift_metal::MatchKeypoint> metal_keypoints1_;
   std::vector<sift_metal::MatchKeypoint> metal_keypoints2_;
+  std::vector<sift_metal::MatchCamRayWithJac> metal_cam_rays1_;
+  std::vector<sift_metal::MatchCamRayWithJac> metal_cam_rays2_;
   std::map<image_t, MetalKeypointCacheEntry> raw_metal_keypoint_cache_;
-  std::map<image_t, MetalKeypointCacheEntry> normalized_metal_keypoint_cache_;
+  std::map<image_t, MetalCamRayCacheEntry> tangent_metal_keypoint_cache_;
 };
 #endif  // COLMAP_METAL_ENABLED
 
 #if defined(COLMAP_GPU_ENABLED) && !defined(COLMAP_METAL_ENABLED)
+
+// Number of floats per feature in the SiftGPU bearing-plus-Jacobian layout:
+// the unit bearing followed by the two columns of d(bearing) / d(pixel).
+constexpr int kNumCamRayWithJacElems = 9;
+
+// Pack bearings and unprojection Jacobians for the SiftGPU tangent Sampson
+// kernel. Keypoints that cannot be unprojected are zeroed, which makes both the
+// numerator and the denominator of the residual vanish; the kernel treats a
+// zero denominator as "no geometric information" and rejects the pair.
+std::vector<float> PackCamRaysWithJac(const Camera& camera,
+                                      const FeatureKeypoints& keypoints) {
+  std::vector<float> packed(keypoints.size() * kNumCamRayWithJacElems, 0.0f);
+  for (size_t i = 0; i < keypoints.size(); ++i) {
+    const FeatureKeypoint& keypoint = keypoints[i];
+    const auto ray_and_jac =
+        camera.CamRayFromImgWithJac(Eigen::Vector2d(keypoint.x, keypoint.y));
+    if (!ray_and_jac) {
+      continue;
+    }
+    float* out = packed.data() + i * kNumCamRayWithJacElems;
+    for (int k = 0; k < 3; ++k) {
+      out[k] = static_cast<float>(ray_and_jac->ray(k));
+      out[3 + k] = static_cast<float>(ray_and_jac->jacobian(k, 0));
+      out[6 + k] = static_cast<float>(ray_and_jac->jacobian(k, 1));
+    }
+  }
+  return packed;
+}
+
 // Mutexes for OpenGL version to protect static variables in SiftGPU.
 // CUDA version doesn't need this as it has its own thread safety.
 static std::map<int, std::unique_ptr<std::mutex>> sift_opengl_mutexes_;
@@ -1828,27 +2134,60 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
 
     two_view_geometry->inlier_matches.clear();
 
-    // Protect OpenGL operations with global mutex based on runtime backend
-    std::unique_lock<std::mutex> lock;
-    if (backend_ == SiftBackend::GLSL) {
-      lock = std::unique_lock<std::mutex>(
-          *sift_opengl_mutexes_.at(sift_match_gpu_.gpu_index));
-    }
-
     constexpr size_t kFeatureShapeNumElems = 4;
 
+    // For calibrated cases, use the essential matrix with normalized
+    // coordinates. This properly handles non-pinhole camera models (with
+    // distortion) where the fundamental matrix relationship doesn't hold. The
+    // essential matrix is also used for UNCALIBRATED pairs that carry
+    // solver-estimated intrinsics (see UseEssentialMatrixForGuidedMatching).
     const bool use_essential_matrix =
         UseEssentialMatrixForGuidedMatching(*two_view_geometry);
     const bool use_fundamental_matrix =
         !use_essential_matrix &&
         two_view_geometry->config == TwoViewGeometry::UNCALIBRATED &&
         two_view_geometry->F.has_value();
+    const bool use_homography =
+        (two_view_geometry->config == TwoViewGeometry::PLANAR ||
+         two_view_geometry->config == TwoViewGeometry::PANORAMIC ||
+         two_view_geometry->config == TwoViewGeometry::PLANAR_OR_PANORAMIC) &&
+        two_view_geometry->H.has_value();
+    // Normalize with the intrinsics the solver estimated where available (its
+    // focal, not the camera's stale default), else the given cameras.
     const Camera& effective_camera1 = two_view_geometry->camera1.has_value()
                                           ? *two_view_geometry->camera1
                                           : *image1.camera;
     const Camera& effective_camera2 = two_view_geometry->camera2.has_value()
                                           ? *two_view_geometry->camera2
                                           : *image2.camera;
+
+    if (use_homography &&
+        UseRayHomographyForGuidedMatching(*two_view_geometry)) {
+      MatchGuidedSiftFeaturesWithRayHomography(
+          max_error,
+          effective_camera1,
+          *image1.keypoints,
+          image1.descriptors->data,
+          effective_camera2,
+          *image2.keypoints,
+          image2.descriptors->data,
+          RayHomographyForGuidedMatching(
+              *two_view_geometry->H, effective_camera1, effective_camera2),
+          *options_.sift,
+          sift_match_gpu_.GetMaxSift(),
+          options_.max_num_matches,
+          &two_view_geometry->inlier_matches);
+      return;
+    }
+
+    // Protect only OpenGL operations with the global per-device mutex. The
+    // ray-homography fallback above is host-only and may be comparatively
+    // expensive, so it must not serialize unrelated GLSL work.
+    std::unique_lock<std::mutex> lock;
+    if (backend_ == SiftBackend::GLSL) {
+      lock = std::unique_lock<std::mutex>(
+          *sift_opengl_mutexes_.at(sift_match_gpu_.gpu_index));
+    }
 
     const uint64_t descriptors_hash1 =
         HashFeatureDescriptors(*image1.descriptors);
@@ -1877,12 +2216,12 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
                                      image1.descriptors->data.rows(),
                                      image1.descriptors->data.data());
       if (use_essential_matrix) {
-        const FeatureKeypoints normalized_keypoints1 =
-            NormalizeFeatureKeypoints(effective_camera1, *image1.keypoints);
-        sift_match_gpu_.SetFeatureLocation(
-            kIndex,
-            reinterpret_cast<const float*>(normalized_keypoints1.data()),
-            kFeatureShapeNumElems);
+        const std::vector<float> cam_rays1 =
+            PackCamRaysWithJac(effective_camera1, *image1.keypoints);
+        sift_match_gpu_.SetFeatureLocation(kIndex,
+                                           cam_rays1.data(),
+                                           /*gap=*/0,
+                                           kNumCamRayWithJacElems);
       } else {
         sift_match_gpu_.SetFeatureLocation(
             kIndex,
@@ -1911,12 +2250,12 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
                                      image2.descriptors->data.rows(),
                                      image2.descriptors->data.data());
       if (use_essential_matrix) {
-        const FeatureKeypoints normalized_keypoints2 =
-            NormalizeFeatureKeypoints(effective_camera2, *image2.keypoints);
-        sift_match_gpu_.SetFeatureLocation(
-            kIndex,
-            reinterpret_cast<const float*>(normalized_keypoints2.data()),
-            kFeatureShapeNumElems);
+        const std::vector<float> cam_rays2 =
+            PackCamRaysWithJac(effective_camera2, *image2.keypoints);
+        sift_match_gpu_.SetFeatureLocation(kIndex,
+                                           cam_rays2.data(),
+                                           /*gap=*/0,
+                                           kNumCamRayWithJacElems);
       } else {
         sift_match_gpu_.SetFeatureLocation(
             kIndex,
@@ -1946,11 +2285,8 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
       // Use fundamental matrix with pixel coordinates.
       E_or_F = two_view_geometry->F->cast<float>();
       E_or_F_ptr = E_or_F.data();
-    } else if (two_view_geometry->config == TwoViewGeometry::PLANAR ||
-               two_view_geometry->config == TwoViewGeometry::PANORAMIC ||
-               two_view_geometry->config ==
-                   TwoViewGeometry::PLANAR_OR_PANORAMIC) {
-      H = two_view_geometry->H.value().cast<float>();
+    } else if (use_homography) {
+      H = two_view_geometry->H->cast<float>();
       H_ptr = H.data();
     } else {
       return;
@@ -1961,11 +2297,9 @@ class SiftGPUFeatureMatcher : public FeatureMatcher {
     two_view_geometry->inlier_matches.resize(
         static_cast<size_t>(options_.max_num_matches));
 
-    const float max_residual =
-        use_essential_matrix
-            ? static_cast<float>(ComputeNormalizedGuidedMatchingMaxResidual(
-                  effective_camera1, effective_camera2, max_error))
-            : static_cast<float>(max_error * max_error);
+    // Every config scores in pixels: the tangent Sampson error for E, the
+    // pixel Sampson error for F, and the pixel transfer error for H.
+    const float max_residual = static_cast<float>(max_error * max_error);
 
     const int num_matches = sift_match_gpu_.GetGuidedSiftMatch(
         options_.max_num_matches,

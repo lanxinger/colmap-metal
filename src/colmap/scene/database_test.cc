@@ -503,6 +503,8 @@ TEST_P(ParameterizedDatabaseTests, TwoViewGeometry) {
   two_view_geometry.F = Eigen::Matrix3d::Random();
   two_view_geometry.E = Eigen::Matrix3d::Random();
   two_view_geometry.H = Eigen::Matrix3d::Random();
+  two_view_geometry.H_estimation_space =
+      TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
   two_view_geometry.cam2_from_cam1 =
       Rigid3d(Eigen::Quaterniond::UnitRandom(), Eigen::Vector3d::Random());
   // Distinct cameras so the swap performed on inverse reads is observable.
@@ -526,6 +528,10 @@ TEST_P(ParameterizedDatabaseTests, TwoViewGeometry) {
   EXPECT_EQ(two_view_geometry.F, two_view_geometry_read.F);
   EXPECT_EQ(two_view_geometry.E, two_view_geometry_read.E);
   EXPECT_EQ(two_view_geometry.H, two_view_geometry_read.H);
+  // Homography provenance is intentionally transient. Existing database rows
+  // therefore remain compatible and take the conservative pixel-H path.
+  EXPECT_EQ(two_view_geometry_read.H_estimation_space,
+            TwoViewGeometry::HomographyEstimationSpace::UNKNOWN);
   EXPECT_TRUE(two_view_geometry.cam2_from_cam1.has_value());
   EXPECT_TRUE(two_view_geometry_read.cam2_from_cam1.has_value());
   EXPECT_EQ(two_view_geometry.cam2_from_cam1->rotation().coeffs(),
@@ -553,6 +559,8 @@ TEST_P(ParameterizedDatabaseTests, TwoViewGeometry) {
             two_view_geometry_read.E.value());
   EXPECT_TRUE(two_view_geometry_read_inv.H.value().inverse().eval().isApprox(
       two_view_geometry_read.H.value()));
+  EXPECT_EQ(two_view_geometry_read_inv.H_estimation_space,
+            TwoViewGeometry::HomographyEstimationSpace::UNKNOWN);
   EXPECT_TRUE(two_view_geometry_read_inv.cam2_from_cam1.has_value());
   EXPECT_TRUE(two_view_geometry_read_inv.cam2_from_cam1->rotation().isApprox(
       Inverse(*two_view_geometry_read.cam2_from_cam1).rotation()));
@@ -571,6 +579,8 @@ TEST_P(ParameterizedDatabaseTests, TwoViewGeometry) {
   EXPECT_EQ(two_view_geometry.F, two_view_geometries[0].second.F);
   EXPECT_EQ(two_view_geometry.E, two_view_geometries[0].second.E);
   EXPECT_EQ(two_view_geometry.H, two_view_geometries[0].second.H);
+  EXPECT_EQ(two_view_geometries[0].second.H_estimation_space,
+            TwoViewGeometry::HomographyEstimationSpace::UNKNOWN);
   EXPECT_TRUE(two_view_geometries[0].second.cam2_from_cam1.has_value());
   EXPECT_EQ(two_view_geometry.cam2_from_cam1->rotation().coeffs(),
             two_view_geometries[0].second.cam2_from_cam1->rotation().coeffs());

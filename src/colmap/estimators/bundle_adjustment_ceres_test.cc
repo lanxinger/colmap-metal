@@ -33,6 +33,7 @@
 #include "colmap/scene/reconstruction_matchers.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/sensor/models.h"
+#include "colmap/util/cuda.h"
 #include "colmap/util/testing.h"
 
 #include <gtest/gtest.h>
@@ -120,6 +121,25 @@ inline const ceres::Solver::Summary& GetCeresSummary(
   CHECK_NOTNULL(ceres_summary);
   return ceres_summary->ceres_summary;
 }
+
+#ifdef COLMAP_CUDA_ENABLED
+TEST(CeresBundleAdjustmentOptions, FallsBackToCpuWithoutCudaDevice) {
+  if (GetNumCudaDevices() > 0) {
+    GTEST_SKIP() << "CUDA GPU is available";
+  }
+
+  CeresBundleAdjustmentOptions options;
+  options.use_gpu = true;
+  options.min_num_images_gpu_solver = 0;
+
+  const ceres::Solver::Options solver_options =
+      options.CreateSolverOptions(BundleAdjustmentConfig(), ceres::Problem());
+  EXPECT_EQ(solver_options.dense_linear_algebra_library_type,
+            options.solver_options.dense_linear_algebra_library_type);
+  EXPECT_EQ(solver_options.sparse_linear_algebra_library_type,
+            options.solver_options.sparse_linear_algebra_library_type);
+}
+#endif  // COLMAP_CUDA_ENABLED
 
 #if defined(__APPLE__)
 TEST(CeresBundleAdjustmentOptions, UsesAccelerateLapackForDenseProblems) {
@@ -209,6 +229,36 @@ TEST(DefaultBundleAdjuster, NominalMultiCameraRig) {
                                  /*max_proj_center_error=*/0.1,
                                  /*max_scale_error=*/std::nullopt,
                                  /*num_obs_tolerance=*/0.0));
+}
+
+TEST(DefaultBundleAdjuster, Cancellation) {
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions synthetic_dataset_options;
+  synthetic_dataset_options.num_rigs = 1;
+  synthetic_dataset_options.num_cameras_per_rig = 1;
+  synthetic_dataset_options.num_frames_per_rig = 3;
+  synthetic_dataset_options.num_points3D = 20;
+  SynthesizeDataset(synthetic_dataset_options, &reconstruction);
+
+  BundleAdjustmentConfig config;
+  for (const image_t image_id : reconstruction.RegImageIds()) {
+    config.AddImage(image_id);
+  }
+  config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
+
+  int num_checks = 0;
+  BundleAdjustmentOptions options;
+  options.check_if_stopped = [&num_checks]() {
+    ++num_checks;
+    return true;
+  };
+  const auto summary =
+      CreateDefaultCeresBundleAdjuster(options, config, reconstruction)
+          ->Solve();
+
+  EXPECT_EQ(num_checks, 1);
+  EXPECT_EQ(summary->termination_type,
+            BundleAdjustmentTerminationType::USER_SUCCESS);
 }
 
 TEST(DefaultBundleAdjuster, TwoView) {

@@ -31,12 +31,30 @@ void BindTwoViewGeometryScene(py::module& m) {
       .value("MULTIPLE", TwoViewGeometry::MULTIPLE);
   AddStringToEnumConstructor(PyTwoViewGeometryConfiguration);
 
+  py::enum_<TwoViewGeometry::HomographyEstimationSpace>
+      PyHomographyEstimationSpace(m, "HomographyEstimationSpace");
+  PyHomographyEstimationSpace
+      .value("UNKNOWN", TwoViewGeometry::HomographyEstimationSpace::UNKNOWN)
+      .value("PIXEL", TwoViewGeometry::HomographyEstimationSpace::PIXEL)
+      .value("CAMERA_RAY",
+             TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY);
+  AddStringToEnumConstructor(PyHomographyEstimationSpace);
+
   py::classh<TwoViewGeometry> PyTwoViewGeometry(m, "TwoViewGeometry");
   PyTwoViewGeometry.def(py::init<>())
       .def_readwrite("config", &TwoViewGeometry::config)
       .def_readwrite("E", &TwoViewGeometry::E)
       .def_readwrite("F", &TwoViewGeometry::F)
-      .def_readwrite("H", &TwoViewGeometry::H)
+      .def_property(
+          "H",
+          [](TwoViewGeometry& self) -> std::optional<Eigen::Matrix3d>& {
+            return self.H;
+          },
+          [](TwoViewGeometry& self, std::optional<Eigen::Matrix3d> H) {
+            self.H = std::move(H);
+          },
+          py::return_value_policy::reference_internal)
+      .def_readwrite("H_estimation_space", &TwoViewGeometry::H_estimation_space)
       .def_readwrite("cam2_from_cam1", &TwoViewGeometry::cam2_from_cam1)
       .def_readwrite("camera1", &TwoViewGeometry::camera1)
       .def_readwrite("camera2", &TwoViewGeometry::camera2)

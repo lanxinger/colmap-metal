@@ -330,8 +330,13 @@ matching modes, which are intended for different input scenarios:
   other. This matching mode has built-in loop detection based on a vocabulary
   tree, where every N-th image (``--SequentialMatching.loop_detection_period``)
   is matched against its visually most similar images
-  (``--SequentialMatching.loop_detection_num_images``). Note that image
-  file names must be ordered sequentially (e.g., ``image0001.jpg``,
+  (``--SequentialMatching.loop_detection_num_images``). Retrieved images can
+  be restricted to those that are sufficiently far from the query in the
+  selected sequence order
+  (``--SequentialMatching.loop_detection_min_index_distance``), so nearby
+  images do not consume the loop detection budget. A value of zero disables
+  this restriction. Note that image file names must be ordered sequentially
+  (e.g., ``image0001.jpg``,
   ``image0002.jpg``, etc.). The order in the database is not relevant, since the
   images are explicitly ordered according to their file names. By default, the
   full relative path is used. For capture sequences split across camera

@@ -15,6 +15,12 @@ def test_has_cuda_is_bool():
     assert isinstance(pycolmap.has_cuda, bool)
 
 
+def test_hash_map_backend_is_known():
+    assert pycolmap.__hash_map_backend__ in ("std", "boost")
+    assert f"{pycolmap.__hash_map_backend__} hash maps" in pycolmap.COLMAP_build
+    assert "__hash_map_backend__" in pycolmap.__all__
+
+
 def test_colmap_version_is_str():
     assert isinstance(pycolmap.COLMAP_version, str)
     assert len(pycolmap.COLMAP_version) > 0

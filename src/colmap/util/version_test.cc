@@ -29,6 +29,8 @@
 
 #include "colmap/util/version.h"
 
+#include "colmap/util/hash_containers.h"
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -57,6 +59,8 @@ TEST(GetBuildInfo, Nominal) {
   const std::string build_info = GetBuildInfo();
   EXPECT_FALSE(build_info.empty());
   EXPECT_THAT(build_info, testing::HasSubstr("Commit"));
+  EXPECT_THAT(build_info,
+              testing::HasSubstr(std::string(kHashMapBackend) + " hash maps"));
 }
 
 }  // namespace

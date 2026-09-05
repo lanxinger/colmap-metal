@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-COLMAP is a general-purpose Structure-from-Motion (SfM) and Multi-View Stereo (MVS) pipeline that reconstructs 3D models from 2D image collections. Written in C++17 with optional CUDA support. Single binary (colmap) with many subcommands, a Qt GUI, and Python bindings (pycolmap).
+COLMAP is a general-purpose Structure-from-Motion (SfM) and Multi-View Stereo (MVS) pipeline that reconstructs 3D models from 2D image collections. Written in C++17 with optional CUDA and macOS Metal support. Single binary (colmap) with many subcommands, a Qt GUI, and Python bindings (pycolmap).
 
 ## Directory Structure
 
@@ -88,6 +88,10 @@ COLMAP is a general-purpose Structure-from-Motion (SfM) and Multi-View Stereo (M
 
 CLI entry point: exe/colmap.cc (subcommand dispatcher).
 
+## Maintained Metal backend
+
+`METAL_ENABLED` is declared in `CMakeLists.txt` and enabled on Apple platforms through `cmake/FindDependencies.cmake`. When changing GPU feature extraction or image warping, inspect the relevant Metal implementation alongside the other affected backends. `scripts/benchmark_sift_metal.py` is the SIFT benchmark entry point; `benchmark/benchmark_sift_metal_test.py` checks its reporting/selection behavior. A benchmark-script unit test does not establish GPU correctness or performance: use a matched dataset and target Mac for those claims.
+
 ## Build Instructions
 
 ```bash
@@ -123,7 +127,7 @@ If there is a local `.python-version` file, use pyenv/uv for Python commands, `p
 
 ## Testing
 
-Follow C++ and Python build instructions above.
+Use the relevant C++/Python build above and select tests for the affected module. Documentation-only edits need link/example review. Reuse completed checks until new changes or unresolved results require a rerun; backend changes still need the corresponding runtime evidence.
 
 Run ctest from the build directory:
 
@@ -206,6 +210,7 @@ scripts/format/python.sh
 | Library | Role | Gate |
 |---------|------|------|
 | CUDA | GPU PatchMatch, SiftGPU, Ceres GPU BA | CUDA_ENABLED |
+| Metal | macOS GPU feature extraction and image warping | METAL_ENABLED (Apple platforms) |
 | ONNX Runtime | ALIKED, LightGlue neural features | ONNX_ENABLED |
 | Qt5/6 | GUI | GUI_ENABLED |
 | OpenGL/GLEW | 3D visualization, SiftGPU | OPENGL_ENABLED |

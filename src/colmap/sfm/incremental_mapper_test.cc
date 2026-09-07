@@ -36,6 +36,8 @@
 #include "colmap/util/hash_containers.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <thread>
 
 #include <gtest/gtest.h>
 
@@ -351,6 +353,44 @@ TEST_F(IncrementalMapperTest, FindLocalBundle) {
   for (const auto image_id : local_bundle) {
     EXPECT_GT(reg_image_id_set.count(image_id), 0);
   }
+}
+
+TEST_F(IncrementalMapperTest, InitialPairCancellationAndRecovery) {
+  options_.num_threads = 2;
+  const auto calling_thread = std::this_thread::get_id();
+  int polls = 0;
+  EXPECT_FALSE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_, [&] {
+        EXPECT_EQ(std::this_thread::get_id(), calling_thread);
+        return ++polls >= 2;
+      }));
+  EXPECT_GE(polls, 2);
+  EXPECT_EQ(image_id1_, kInvalidImageId);
+  EXPECT_EQ(image_id2_, kInvalidImageId);
+
+  mapper_->ResetInitializationStats();
+  EXPECT_TRUE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
+}
+
+TEST_F(IncrementalMapperTest, InitialPairStopPredicateExceptionIsRecoverable) {
+  options_.num_threads = 2;
+  int polls = 0;
+  EXPECT_THROW(mapper_->FindInitialImagePair(options_,
+                                             image_id1_,
+                                             image_id2_,
+                                             cam2_from_cam1_,
+                                             [&] {
+                                               if (++polls >= 2)
+                                                 throw std::runtime_error(
+                                                     "stop predicate failed");
+                                               return false;
+                                             }),
+               std::runtime_error);
+  EXPECT_GE(polls, 2);
+  mapper_->ResetInitializationStats();
+  EXPECT_TRUE(mapper_->FindInitialImagePair(
+      options_, image_id1_, image_id2_, cam2_from_cam1_));
 }
 
 TEST_F(IncrementalMapperTest, ResetInitializationStats) {

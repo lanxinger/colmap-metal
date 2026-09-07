@@ -151,10 +151,12 @@ void IncrementalMapper::EndReconstruction(const bool discard) {
   reconstruction_ = nullptr;
 }
 
-bool IncrementalMapper::FindInitialImagePair(const Options& options,
-                                             image_t& image_id1,
-                                             image_t& image_id2,
-                                             Rigid3d& cam2_from_cam1) {
+bool IncrementalMapper::FindInitialImagePair(
+    const Options& options,
+    image_t& image_id1,
+    image_t& image_id2,
+    Rigid3d& cam2_from_cam1,
+    const std::function<bool()>& check_if_stopped) {
   const std::optional<IncrementalMapperImpl::InitInfo> init_info =
       IncrementalMapperImpl::FindInitialImagePair(
           options,
@@ -164,7 +166,8 @@ bool IncrementalMapper::FindInitialImagePair(const Options& options,
           reg_stats_.num_registrations,
           reg_stats_.init_image_pairs,
           image_id1,
-          image_id2);
+          image_id2,
+          check_if_stopped);
   if (!init_info.has_value()) {
     return false;
   }

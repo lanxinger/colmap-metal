@@ -13,6 +13,9 @@ compile_commands.json
 .vs
 .DS_Store
 .cache
+/.build/
+/.swiftpm/
+.build/
 build*/
 install*/
 data/
@@ -20,6 +23,8 @@ benchmark/reconstruction/data/
 benchmark/reconstruction/runs/
 doc/_build
 vcpkg_installed/
+Artifacts/
+ios/Sources/ColmapSparse/Resources/*/sift.metallib
 
 # Compiled Object files
 *.slo

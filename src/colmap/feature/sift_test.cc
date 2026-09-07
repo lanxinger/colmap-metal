@@ -40,6 +40,7 @@
 #include "colmap/geometry/essential_matrix.h"
 #include "colmap/math/random.h"
 #include "colmap/util/opengl_utils.h"
+#include "colmap/util/testing.h"
 #if defined(COLMAP_METAL_ENABLED)
 #include "thirdparty/SiftMetal/SiftMetal.h"
 #endif
@@ -360,6 +361,14 @@ TEST(ExtractSiftFeaturesMetal, RejectsNonPositiveFeatureLimit) {
   EXPECT_FALSE(extractor.Init(options, 256, 256));
 }
 
+TEST(ExtractSiftFeaturesMetal, RejectsMissingExplicitMetalLibrary) {
+  const std::string path = (CreateTestDir() / "missing.metallib").string();
+  sift_metal::SiftMetalExtractor extractor;
+  EXPECT_FALSE(extractor.Init(sift_metal::Options(), 64, 64, path));
+  sift_metal::SiftMetalMatcher matcher;
+  EXPECT_FALSE(matcher.Init(path));
+}
+
 TEST(ExtractSiftFeaturesMetal, RejectsUnsupportedFirstOctave) {
   sift_metal::Options options;
   options.first_octave = 1;
@@ -409,10 +418,15 @@ TEST(ExtractSiftFeaturesMetal, AllowsOrientationExpandedDescriptorLimit) {
 }
 
 TEST(ExtractSiftFeaturesMetal, ReusesTexturesAcrossMixedImageSizes) {
-  const std::array<Bitmap, 3> bitmaps = {
+  const std::array<Bitmap, 8> bitmaps = {
       CreateImageWithRectangle(257, 193),
       CreateImageWithRectangle(193, 257),
+      CreateImageWithRectangle(181, 241),
+      CreateImageWithRectangle(65, 49),
+      CreateImageWithRectangle(49, 65),
       CreateImageWithRectangle(321, 181),
+      CreateImageWithRectangle(257, 193),
+      CreateImageWithRectangle(193, 257),
   };
   for (const int first_octave : {-1, 0}) {
     sift_metal::Options options;
@@ -464,6 +478,53 @@ TEST(ExtractSiftFeaturesMetal, RetainsCpuComparableFeatureYield) {
       << cpu_keypoints.size() << " on CPU";
 }
 
+TEST(ExtractSiftFeaturesMetal, MatchesCpuKeypointScalesWithoutUpscaling) {
+  const Bitmap bitmap = CreateMultiscaleValueNoiseImage(512, 768);
+  FeatureExtractionOptions options(FeatureExtractorType::SIFT);
+  options.sift->first_octave = 0;
+  options.use_gpu = false;
+  auto cpu_extractor = CreateSiftFeatureExtractor(options);
+  ASSERT_NE(cpu_extractor, nullptr);
+  FeatureKeypoints cpu_keypoints;
+  FeatureDescriptors cpu_descriptors;
+  ASSERT_TRUE(
+      cpu_extractor->Extract(bitmap, &cpu_keypoints, &cpu_descriptors));
+
+  options.use_gpu = true;
+  auto metal_extractor = CreateSiftFeatureExtractor(options);
+  ASSERT_NE(metal_extractor, nullptr);
+  FeatureKeypoints metal_keypoints;
+  FeatureDescriptors metal_descriptors;
+  ASSERT_TRUE(metal_extractor->Extract(
+      bitmap, &metal_keypoints, &metal_descriptors));
+
+  // Omitting the upscaled octave must preserve the CPU pyramid's blur and
+  // keypoint scale. Counts alone also accept an incorrectly underblurred image.
+  size_t num_matching_keypoints = 0;
+  float min_cpu_scale = std::numeric_limits<float>::max();
+  for (const auto& cpu : cpu_keypoints) {
+    min_cpu_scale = std::min(min_cpu_scale, cpu.ComputeScale());
+    for (const auto& metal : metal_keypoints) {
+      if (std::hypot(cpu.x - metal.x, cpu.y - metal.y) < 1.0f &&
+          std::abs(std::log(cpu.ComputeScale() / metal.ComputeScale())) < 0.1f) {
+        ++num_matching_keypoints;
+        break;
+      }
+    }
+  }
+  ASSERT_GT(cpu_keypoints.size(), 200);
+  ASSERT_FALSE(metal_keypoints.empty());
+  float min_metal_scale = std::numeric_limits<float>::max();
+  for (const auto& metal : metal_keypoints) {
+    min_metal_scale = std::min(min_metal_scale, metal.ComputeScale());
+  }
+  EXPECT_GE(min_metal_scale, 0.9f * min_cpu_scale);
+  EXPECT_GE(num_matching_keypoints * 100, cpu_keypoints.size() * 70)
+      << num_matching_keypoints << " location/scale-consistent keypoints, "
+      << cpu_keypoints.size() << " CPU features, " << metal_keypoints.size()
+      << " Metal features";
+}
+
 TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
   sift_metal::SiftMetalMatcher matcher;
   ASSERT_TRUE(matcher.Init());
@@ -498,6 +559,43 @@ TEST(MatchSiftFeaturesMetal, ClearsMatchesOnInvalidInput) {
                                    1.0f,
                                    &matches));
   EXPECT_TRUE(matches.empty());
+}
+
+TEST(MatchSiftFeaturesMetal, SupportsBoundedAndDisabledDescriptorCaching) {
+  // Each pair of rows occupies 256 bytes. A 512-byte cache fits two sets and
+  // must evict an earlier set when the third set is matched.
+  std::array<uint8_t, 256> first = {};
+  for (int i = 0; i < 4; ++i) {
+    first[i] = 255;
+    first[128 + 4 + i] = 255;
+  }
+  auto third = first;
+  for (const size_t cache_bytes : {0, 512}) {
+    SCOPED_TRACE(cache_bytes);
+    sift_metal::SiftMetalMatcher matcher;
+    ASSERT_TRUE(matcher.Init({}, cache_bytes));
+    auto second = first;
+    std::swap_ranges(second.begin(), second.begin() + 128, second.begin() + 128);
+    std::vector<sift_metal::MatchResult> matches;
+    auto ExpectMatch = [&](const auto& target, const uint32_t expected_first) {
+      ASSERT_TRUE(matcher.Match(first.data(),
+                                2,
+                                target.data(),
+                                2,
+                                sift_metal::MatchOptions(),
+                                &matches));
+      ASSERT_EQ(matches.size(), 2);
+      EXPECT_EQ(matches[0].index1, 0);
+      EXPECT_EQ(matches[0].index2, expected_first);
+      EXPECT_EQ(matches[1].index1, 1);
+      EXPECT_EQ(matches[1].index2, 1 - expected_first);
+    };
+    ExpectMatch(second, 1);
+    ExpectMatch(third, 0);
+    ExpectMatch(second, 1);
+    second = first;
+    ExpectMatch(second, 0);
+  }
 }
 #endif
 

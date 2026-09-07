@@ -37,6 +37,7 @@
 #include "colmap/util/threading.h"
 
 #include <array>
+#include <chrono>
 
 namespace colmap {
 namespace {
@@ -195,8 +196,10 @@ IncrementalMapperImpl::FindInitialImagePair(
     const FlatHashMap<image_t, size_t>& num_registrations,
     FlatHashSet<image_pair_t>& init_image_pairs,
     image_t image_id1,
-    image_t image_id2) {
+    image_t image_id2,
+    const std::function<bool()>& check_if_stopped) {
   THROW_CHECK(options.Check());
+  if (check_if_stopped && check_if_stopped()) return std::nullopt;
 
   const CorrespondenceGraph& correspondence_graph =
       *database_cache.CorrespondenceGraph();
@@ -230,51 +233,88 @@ IncrementalMapperImpl::FindInitialImagePair(
 
   std::mutex init_image_pairs_mutex;
   std::atomic_bool stop = false;
+  bool cancelled = false;
+
+  const auto poll_stop = [&] {
+    if (!cancelled && check_if_stopped && check_if_stopped()) {
+      cancelled = true;
+      stop.store(true);
+    }
+  };
 
   // Try to find good initial pair.
-  for (const image_t image_id1 : image_ids1) {
-    init_infos.push_back(
-        thread_pool.AddTask([&, image_id1]() -> std::optional<InitInfo> {
-          if (stop.load()) {
-            return std::nullopt;
-          }
-
-          const std::vector<image_t> image_ids2 =
-              IncrementalMapperImpl::FindSecondInitialImage(
-                  options,
-                  image_id1,
-                  correspondence_graph,
-                  reconstruction,
-                  num_registrations);
-
-          for (const image_t image_id2 : image_ids2) {
+  try {
+    for (const image_t image_id1 : image_ids1) {
+      init_infos.push_back(
+          thread_pool.AddTask([&, image_id1]() -> std::optional<InitInfo> {
             if (stop.load()) {
               return std::nullopt;
             }
 
-            const image_pair_t pair_id =
-                ImagePairToPairId(image_id1, image_id2);
+            const std::vector<image_t> image_ids2 =
+                IncrementalMapperImpl::FindSecondInitialImage(
+                    options,
+                    image_id1,
+                    correspondence_graph,
+                    reconstruction,
+                    num_registrations);
 
-            // Try every pair only once.
-            {
-              std::lock_guard<std::mutex> lock_guard(init_image_pairs_mutex);
-              if (!init_image_pairs.emplace(pair_id).second) {
-                continue;
+            for (const image_t image_id2 : image_ids2) {
+              if (stop.load()) {
+                return std::nullopt;
+              }
+
+              const image_pair_t pair_id =
+                  ImagePairToPairId(image_id1, image_id2);
+
+              // Try every pair only once.
+              {
+                std::lock_guard<std::mutex> lock_guard(init_image_pairs_mutex);
+                if (!init_image_pairs.emplace(pair_id).second) {
+                  continue;
+                }
+              }
+
+              std::optional<InitInfo> pair_init_info =
+                  IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
+                      options, database_cache, image_id1, image_id2);
+              if (pair_init_info.has_value()) {
+                stop.store(true);
+                return pair_init_info;
               }
             }
 
-            std::optional<InitInfo> pair_init_info =
-                IncrementalMapperImpl::EstimateInitialTwoViewGeometry(
-                    options, database_cache, image_id1, image_id2);
-            if (pair_init_info.has_value()) {
-              stop.store(true);
-              return pair_init_info;
-            }
-          }
+            return std::nullopt;
+          }));
+    }
 
-          return std::nullopt;
-        }));
+    // Keep the callback on the calling thread: it may belong to an application
+    // executor or language runtime. Workers only inspect the atomic stop flag.
+    if (check_if_stopped) {
+      for (auto& future : init_infos) {
+        while (future.wait_for(std::chrono::milliseconds(20)) !=
+               std::future_status::ready) {
+          poll_stop();
+        }
+        poll_stop();
+      }
+    }
+
+    // Observe worker exceptions while the pool is still alive. Reading a future
+    // first could unwind into the pool destructor with the same exception still
+    // pending in its task checkers, which would terminate an embedding process.
+    thread_pool.Wait();
+  } catch (...) {
+    stop.store(true);
+    // Drain worker exceptions before unwinding, including if the caller's
+    // predicate threw. Preserve the original failure for the embedding API.
+    try {
+      thread_pool.Wait();
+    } catch (...) {
+    }
+    throw;
   }
+  if (cancelled) return std::nullopt;
 
   // Iterate through the already computed results and return the first
   // successful result. This is deterministic and produces the same result

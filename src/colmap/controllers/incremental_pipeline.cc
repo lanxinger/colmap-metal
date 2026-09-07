@@ -495,7 +495,9 @@ IncrementalPipeline::Status IncrementalPipeline::InitializeReconstruction(
   if (!options_->IsInitialPairProvided()) {
     LOG(INFO) << "Finding good initial image pair";
     const bool find_init_success = mapper.FindInitialImagePair(
-        mapper_options, image_id1, image_id2, cam2_from_cam1);
+        mapper_options, image_id1, image_id2, cam2_from_cam1, [this] {
+          return CheckIfStopped() || CheckReachedMaxRuntime();
+        });
     if (CheckIfStopped() || CheckReachedMaxRuntime()) {
       return Status::INTERRUPTED;
     }

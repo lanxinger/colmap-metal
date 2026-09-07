@@ -46,6 +46,25 @@ discovery and CLI. The small versioned [C API](include/ColmapSparse.h) hides
 C++/Eigen/Ceres types. Keep the [dependency notices](THIRD_PARTY_NOTICES.md) and
 their `Licenses/` files with any distributed package.
 
+## Continuous integration
+
+The `COLMAP (iOS package)` workflow builds the package on an arm64 Mac with Xcode 26.3
+for pull requests, pushes to `main` or release branches, and manual runs. It
+downloads checksum-verified Boost 1.92.0 headers and uses the pinned dependency
+builds above; cached downloads are verified again before use.
+
+CI builds all three native slices and their Metal libraries, assembles the
+XCFramework, runs the native Mac validation executables and Swift package tests,
+and builds the Swift test targets for generic arm64 iPhone and Simulator
+destinations without code signing. The iOS destinations establish compile/link
+and resource-packaging compatibility; their tests are not executed by this job.
+Physical-device reconstruction, thermal behavior, and msplat interoperability
+still require device validation.
+
+Build logs and package provenance are retained as CI artifacts. The separate
+`COLMAP (Mac)` workflow checks formatting once, then builds and runs the desktop
+Metal/C++ test suite with both STD and BOOST hash backends.
+
 ## Capture and reconstruction contract
 
 ```swift

@@ -487,16 +487,15 @@ TEST(ExtractSiftFeaturesMetal, MatchesCpuKeypointScalesWithoutUpscaling) {
   ASSERT_NE(cpu_extractor, nullptr);
   FeatureKeypoints cpu_keypoints;
   FeatureDescriptors cpu_descriptors;
-  ASSERT_TRUE(
-      cpu_extractor->Extract(bitmap, &cpu_keypoints, &cpu_descriptors));
+  ASSERT_TRUE(cpu_extractor->Extract(bitmap, &cpu_keypoints, &cpu_descriptors));
 
   options.use_gpu = true;
   auto metal_extractor = CreateSiftFeatureExtractor(options);
   ASSERT_NE(metal_extractor, nullptr);
   FeatureKeypoints metal_keypoints;
   FeatureDescriptors metal_descriptors;
-  ASSERT_TRUE(metal_extractor->Extract(
-      bitmap, &metal_keypoints, &metal_descriptors));
+  ASSERT_TRUE(
+      metal_extractor->Extract(bitmap, &metal_keypoints, &metal_descriptors));
 
   // Omitting the upscaled octave must preserve the CPU pyramid's blur and
   // keypoint scale. Counts alone also accept an incorrectly underblurred image.
@@ -506,7 +505,8 @@ TEST(ExtractSiftFeaturesMetal, MatchesCpuKeypointScalesWithoutUpscaling) {
     min_cpu_scale = std::min(min_cpu_scale, cpu.ComputeScale());
     for (const auto& metal : metal_keypoints) {
       if (std::hypot(cpu.x - metal.x, cpu.y - metal.y) < 1.0f &&
-          std::abs(std::log(cpu.ComputeScale() / metal.ComputeScale())) < 0.1f) {
+          std::abs(std::log(cpu.ComputeScale() / metal.ComputeScale())) <
+              0.1f) {
         ++num_matching_keypoints;
         break;
       }
@@ -575,7 +575,8 @@ TEST(MatchSiftFeaturesMetal, SupportsBoundedAndDisabledDescriptorCaching) {
     sift_metal::SiftMetalMatcher matcher;
     ASSERT_TRUE(matcher.Init({}, cache_bytes));
     auto second = first;
-    std::swap_ranges(second.begin(), second.begin() + 128, second.begin() + 128);
+    std::swap_ranges(
+        second.begin(), second.begin() + 128, second.begin() + 128);
     std::vector<sift_metal::MatchResult> matches;
     auto ExpectMatch = [&](const auto& target, const uint32_t expected_first) {
       ASSERT_TRUE(matcher.Match(first.data(),

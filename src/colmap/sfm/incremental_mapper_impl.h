@@ -88,7 +88,8 @@ class IncrementalMapperImpl {
       const FlatHashMap<image_t, size_t>& num_registrations,
       FlatHashSet<image_pair_t>& init_image_pairs,
       image_t image_id1,
-      image_t image_id2);
+      image_t image_id2,
+      const std::function<bool()>& check_if_stopped = {});
 
   // Implement IncrementalMapper::FindNextImages
   static std::vector<image_t> FindNextImages(

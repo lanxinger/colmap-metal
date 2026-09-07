@@ -36,6 +36,7 @@
 #include "colmap/sfm/observation_manager.h"
 #include "colmap/util/hash_containers.h"
 
+#include <functional>
 #include <optional>
 
 namespace colmap {
@@ -198,10 +199,13 @@ class IncrementalMapper {
   // Find initial image pair to seed the incremental reconstruction. The image
   // pairs should be passed to `RegisterInitialImagePair`. This function
   // automatically ignores image pairs that failed to register previously.
+  // The optional stop predicate is polled on the calling thread. Cancellation
+  // stops scheduling work between two-view estimates and returns false.
   bool FindInitialImagePair(const Options& options,
                             image_t& image_id1,
                             image_t& image_id2,
-                            Rigid3d& cam2_from_cam1);
+                            Rigid3d& cam2_from_cam1,
+                            const std::function<bool()>& check_if_stopped = {});
 
   // Find best next image to register in the incremental reconstruction. The
   // images should be passed to `RegisterNextImage` and

@@ -62,8 +62,8 @@ static std::vector<float> GaussianWeights(float sigma) {
 struct Octave {
   int o = 0;                 // octave index
   float delta = 0.0f;        // sampling distance
-  // Logical dimensions of the current image at this octave. Textures grow
-  // monotonically as needed and are reused across images.
+  // Logical dimensions of the current image at this octave. Textures are
+  // reused while the current image fits within the bounded pixel capacity.
   int width = 0, height = 0;
   int num_scales = 0;        // scales per octave (typically 3)
   std::vector<float> sigmas;  // sigma values for each gaussian
@@ -139,7 +139,8 @@ static bool OctavesResourcesReady(const std::vector<Octave>& octaves) {
 // ---------------------------------------------------------------------------
 class SiftMetalExtractorImpl {
  public:
-  bool Init(const Options& opts, int initial_w, int initial_h);
+  bool Init(const Options& opts, int initial_w, int initial_h,
+            const std::string& metallib_path);
   bool Extract(const uint8_t* data, int w, int h, ExtractResult* result);
 
  private:
@@ -330,14 +331,16 @@ static uint64_t HashDescriptorBytes(const uint8_t* bytes, size_t size) {
   return hash;
 }
 
-static NSArray<NSString*>* MetalLibraryCandidatePaths();
+static id<MTLLibrary> LoadMetalLibrary(id<MTLDevice> device,
+                                      const std::string& metallib_path);
 
 // ---------------------------------------------------------------------------
 // SiftMetalMatcherImpl
 // ---------------------------------------------------------------------------
 class SiftMetalMatcherImpl {
  public:
-  bool Init();
+  bool Init(const std::string& metallib_path,
+            size_t descriptor_cache_max_bytes);
   bool Match(const uint8_t* descriptors1, int num_descriptors1,
              const void* keypoints1, const uint8_t* descriptors2,
              int num_descriptors2, const void* keypoints2,
@@ -397,10 +400,12 @@ class SiftMetalMatcherImpl {
   std::vector<SIFTMatcherResult> matches_2to1_;
   std::vector<DescriptorBufferCacheEntry> descriptor_buffer_cache_;
   size_t descriptor_buffer_cache_bytes_ = 0;
+  size_t descriptor_buffer_cache_max_bytes_ = 0;
   uint64_t descriptor_buffer_cache_tick_ = 0;
 };
 
-bool SiftMetalMatcherImpl::Init() {
+bool SiftMetalMatcherImpl::Init(const std::string& metallib_path,
+                                size_t descriptor_cache_max_bytes) {
   static_assert(sizeof(MatchKeypoint) == sizeof(SIFTMatcherKeypoint),
                 "Match keypoint ABI mismatch");
   static_assert(offsetof(MatchKeypoint, x) == offsetof(SIFTMatcherKeypoint, x),
@@ -426,25 +431,13 @@ bool SiftMetalMatcherImpl::Init() {
   commandQueue_ = [device_ newCommandQueue];
   if (!commandQueue_) return false;
 
-  NSError* error = nil;
-  NSFileManager* fileManager = [NSFileManager defaultManager];
-  for (NSString* libPath in MetalLibraryCandidatePaths()) {
-    if (![fileManager fileExistsAtPath:libPath]) {
-      continue;
-    }
-    library_ = [device_ newLibraryWithURL:[NSURL fileURLWithPath:libPath]
-                                    error:&error];
-    if (library_) {
-      break;
-    }
-  }
-  if (!library_) {
-    library_ = [device_ newDefaultLibrary];
-  }
-  if (!library_) {
-    NSLog(@"SiftMetal: Failed to load Metal library for matching: %@", error);
-    return false;
-  }
+  library_ = LoadMetalLibrary(device_, metallib_path);
+  if (!library_) return false;
+
+  descriptor_buffer_cache_max_bytes_ = descriptor_cache_max_bytes;
+  descriptor_buffer_cache_.clear();
+  descriptor_buffer_cache_bytes_ = 0;
+  descriptor_buffer_cache_tick_ = 0;
 
   siftMatchBestPipeline_ = MakePipeline(device_, library_, "siftMatchBest");
   siftMatchBestDotParallelPipeline_ =
@@ -502,9 +495,7 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
     return nil;
   }
 
-  static constexpr size_t kMaxCachedDescriptorBytes =
-      256ull * 1024ull * 1024ull;
-  if (descriptor_bytes > kMaxCachedDescriptorBytes / 2) {
+  if (descriptor_bytes > descriptor_buffer_cache_max_bytes_ / 2) {
     return buffer;
   }
 
@@ -521,9 +512,7 @@ id<MTLBuffer> SiftMetalMatcherImpl::GetDescriptorBuffer(
 }
 
 void SiftMetalMatcherImpl::EvictDescriptorBuffers() {
-  static constexpr size_t kMaxCachedDescriptorBytes =
-      256ull * 1024ull * 1024ull;
-  while (descriptor_buffer_cache_bytes_ > kMaxCachedDescriptorBytes &&
+  while (descriptor_buffer_cache_bytes_ > descriptor_buffer_cache_max_bytes_ &&
          !descriptor_buffer_cache_.empty()) {
     auto lru = descriptor_buffer_cache_.begin();
     for (auto it = descriptor_buffer_cache_.begin();
@@ -826,12 +815,43 @@ static NSArray<NSString*>* MetalLibraryCandidatePaths() {
   return paths;
 }
 
+static id<MTLLibrary> LoadMetalLibrary(id<MTLDevice> device,
+                                      const std::string& metallib_path) {
+  NSError* error = nil;
+  if (!metallib_path.empty()) {
+    NSString* path = [[NSString alloc] initWithBytes:metallib_path.data()
+                                           length:metallib_path.size()
+                                         encoding:NSUTF8StringEncoding];
+    if (!path) return nil;
+    id<MTLLibrary> library =
+        [device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
+    if (!library) {
+      NSLog(@"SiftMetal: Failed to load explicit Metal library: %@", error);
+    }
+    return library;
+  }
+
+  NSFileManager* fileManager = [NSFileManager defaultManager];
+  for (NSString* path in MetalLibraryCandidatePaths()) {
+    if (![fileManager fileExistsAtPath:path]) continue;
+    id<MTLLibrary> library =
+        [device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
+    if (library) return library;
+  }
+  id<MTLLibrary> library = [device newDefaultLibrary];
+  if (!library) {
+    NSLog(@"SiftMetal: Failed to load Metal library: %@", error);
+  }
+  return library;
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 bool SiftMetalExtractorImpl::Init(const Options& opts,
                                   int initial_w,
-                                  int initial_h) {
+                                  int initial_h,
+                                  const std::string& metallib_path) {
   if (initial_w <= 0 || initial_h <= 0 ||
       (opts.first_octave != -1 && opts.first_octave != 0) ||
       opts.scales_per_octave <= 0 || opts.max_num_features <= 0 ||
@@ -867,27 +887,8 @@ bool SiftMetalExtractorImpl::Init(const Options& opts,
   commandQueue_ = [device_ newCommandQueue];
   if (!commandQueue_) return false;
 
-  // Load the pre-compiled Metal library from the build tree or bundle.
-  NSError* error = nil;
-  NSFileManager* fileManager = [NSFileManager defaultManager];
-  for (NSString* libPath in MetalLibraryCandidatePaths()) {
-    if (![fileManager fileExistsAtPath:libPath]) {
-      continue;
-    }
-    library_ = [device_ newLibraryWithURL:[NSURL fileURLWithPath:libPath]
-                                    error:&error];
-    if (library_) {
-      break;
-    }
-  }
-  if (!library_) {
-    // Fallback: try default library.
-    library_ = [device_ newDefaultLibrary];
-  }
-  if (!library_) {
-    NSLog(@"SiftMetal: Failed to load Metal library: %@", error);
-    return false;
-  }
+  library_ = LoadMetalLibrary(device_, metallib_path);
+  if (!library_) return false;
 
   // Create all compute pipelines.
   bilinearUpScalePipeline_ = MakePipeline(device_, library_, "bilinearUpScale");
@@ -924,6 +925,9 @@ bool SiftMetalExtractorImpl::Init(const Options& opts,
   } else {
     delta_min_ = 1.0f;
   }
+  // VLFeat and the descriptor shader use a base sigma of 1.6 octave texels.
+  // Store sigma in input-image coordinates, including without 2x upscaling.
+  sigma_min_ = 1.6f * delta_min_;
 
   input_w_ = initial_w;
   input_h_ = initial_h;
@@ -1172,7 +1176,7 @@ void SiftMetalExtractorImpl::SetupOctave(Octave& oct, int o, float delta,
 // ---------------------------------------------------------------------------
 // ConfigureForSize: adjust logical dimensions for a new image size. Textures
 // stay at their allocated size; only shader parameters and dispatch extents
-// change, so switching sizes (e.g. portrait/landscape) costs no reallocation.
+// change. Extract reallocates first when the shape or retained area requires it.
 // ---------------------------------------------------------------------------
 void SiftMetalExtractorImpl::ConfigureForSize(int w, int h) {
   input_w_ = w;
@@ -1261,12 +1265,16 @@ bool SiftMetalExtractorImpl::Extract(const uint8_t* data, int w, int h,
     return false;
   }
 
-  // Reconfigure for a changed image size. Textures grow monotonically along
-  // each axis only when the image exceeds the current allocation.
+  // Reuse a fitting pyramid unless its retained pixel area is more than twice
+  // the input area. When growing, use the new shape: independent axis maxima
+  // would retain a square pyramid after a landscape/portrait switch.
   if (w != input_w_ || h != input_h_) {
-    if (w > alloc_w_ || h > alloc_h_) {
-      alloc_w_ = std::max(w, alloc_w_);
-      alloc_h_ = std::max(h, alloc_h_);
+    const int64_t input_area = static_cast<int64_t>(w) * h;
+    const int64_t allocated_area = static_cast<int64_t>(alloc_w_) * alloc_h_;
+    if (w > alloc_w_ || h > alloc_h_ || allocated_area > 2 * input_area) {
+      ResetSizeDependentResources();
+      alloc_w_ = w;
+      alloc_h_ = h;
       const int seed_alloc_w = static_cast<int>(float(alloc_w_) / delta_min_);
       const int seed_alloc_h = static_cast<int>(float(alloc_h_) / delta_min_);
 
@@ -1928,13 +1936,18 @@ SiftMetalExtractor::~SiftMetalExtractor() = default;
 
 bool SiftMetalExtractor::Init(const Options& options,
                               int initial_w,
-                              int initial_h) {
-  return impl_->Init(options, initial_w, initial_h);
+                              int initial_h,
+                              const std::string& metallib_path) {
+  @autoreleasepool {
+    return impl_->Init(options, initial_w, initial_h, metallib_path);
+  }
 }
 
 bool SiftMetalExtractor::Extract(const uint8_t* data, int w, int h,
                                   ExtractResult* result) {
-  return impl_->Extract(data, w, h, result);
+  @autoreleasepool {
+    return impl_->Extract(data, w, h, result);
+  }
 }
 
 SiftMetalMatcher::SiftMetalMatcher()
@@ -1942,7 +1955,12 @@ SiftMetalMatcher::SiftMetalMatcher()
 
 SiftMetalMatcher::~SiftMetalMatcher() = default;
 
-bool SiftMetalMatcher::Init() { return impl_->Init(); }
+bool SiftMetalMatcher::Init(const std::string& metallib_path,
+                            size_t descriptor_cache_max_bytes) {
+  @autoreleasepool {
+    return impl_->Init(metallib_path, descriptor_cache_max_bytes);
+  }
+}
 
 bool SiftMetalMatcher::Match(const uint8_t* descriptors1,
                              int num_descriptors1,
@@ -1950,18 +1968,20 @@ bool SiftMetalMatcher::Match(const uint8_t* descriptors1,
                              int num_descriptors2,
                              const MatchOptions& options,
                              std::vector<MatchResult>* matches) {
-  return impl_->Match(descriptors1,
-                      num_descriptors1,
-                      nullptr,
-                      descriptors2,
-                      num_descriptors2,
-                      nullptr,
-                      options,
-                      MatchGuidedGeometry::NONE,
-                      /*keypoint_stride=*/0,
-                      nullptr,
-                      0.0f,
-                      matches);
+  @autoreleasepool {
+    return impl_->Match(descriptors1,
+                        num_descriptors1,
+                        nullptr,
+                        descriptors2,
+                        num_descriptors2,
+                        nullptr,
+                        options,
+                        MatchGuidedGeometry::NONE,
+                        /*keypoint_stride=*/0,
+                        nullptr,
+                        0.0f,
+                        matches);
+  }
 }
 
 bool SiftMetalMatcher::MatchGuided(const uint8_t* descriptors1,
@@ -1975,18 +1995,20 @@ bool SiftMetalMatcher::MatchGuided(const uint8_t* descriptors1,
                                    const float matrix[9],
                                    float max_residual,
                                    std::vector<MatchResult>* matches) {
-  return impl_->Match(descriptors1,
-                      num_descriptors1,
-                      keypoints1,
-                      descriptors2,
-                      num_descriptors2,
-                      keypoints2,
-                      options,
-                      guided_geometry,
-                      sizeof(MatchKeypoint),
-                      matrix,
-                      max_residual,
-                      matches);
+  @autoreleasepool {
+    return impl_->Match(descriptors1,
+                        num_descriptors1,
+                        keypoints1,
+                        descriptors2,
+                        num_descriptors2,
+                        keypoints2,
+                        options,
+                        guided_geometry,
+                        sizeof(MatchKeypoint),
+                        matrix,
+                        max_residual,
+                        matches);
+  }
 }
 
 bool SiftMetalMatcher::MatchGuidedTangent(
@@ -2000,18 +2022,20 @@ bool SiftMetalMatcher::MatchGuidedTangent(
     const float essential_matrix[9],
     float max_residual,
     std::vector<MatchResult>* matches) {
-  return impl_->Match(descriptors1,
-                      num_descriptors1,
-                      cam_rays1,
-                      descriptors2,
-                      num_descriptors2,
-                      cam_rays2,
-                      options,
-                      MatchGuidedGeometry::TANGENT_EPIPOLAR,
-                      sizeof(MatchCamRayWithJac),
-                      essential_matrix,
-                      max_residual,
-                      matches);
+  @autoreleasepool {
+    return impl_->Match(descriptors1,
+                        num_descriptors1,
+                        cam_rays1,
+                        descriptors2,
+                        num_descriptors2,
+                        cam_rays2,
+                        options,
+                        MatchGuidedGeometry::TANGENT_EPIPOLAR,
+                        sizeof(MatchCamRayWithJac),
+                        essential_matrix,
+                        max_residual,
+                        matches);
+  }
 }
 
 }  // namespace sift_metal

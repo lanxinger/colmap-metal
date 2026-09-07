@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace sift_metal {
@@ -88,15 +90,19 @@ class SiftMetalExtractor {
   SiftMetalExtractor();
   ~SiftMetalExtractor();
 
-  // Initialize the Metal pipeline and its initial texture allocation. Resources
-  // grow on demand when Extract receives a larger image.
+  // Initialize the Metal pipeline and its initial texture allocation. A
+  // nonempty metallib_path loads that file exclusively; an empty path searches
+  // the application bundle and installed/build library locations.
   bool Init(const Options& options,
             int initial_image_width,
-            int initial_image_height);
+            int initial_image_height,
+            const std::string& metallib_path = {});
 
   // Extract SIFT features from a grayscale image.
   // data: row-major uint8 grayscale pixels
   // width, height: image dimensions
+  // Texture capacity follows image shape and retains at most twice the current
+  // input pixel area when reusing an allocation for a smaller image.
   bool Extract(const uint8_t* data, int width, int height,
                ExtractResult* result);
 
@@ -109,9 +115,11 @@ class SiftMetalMatcher {
   SiftMetalMatcher();
   ~SiftMetalMatcher();
 
-  // Initialize the Metal matching pipeline. Returns false if Metal is
-  // unavailable.
-  bool Init();
+  // Initialize the Metal matching pipeline. A nonempty metallib_path loads
+  // that file exclusively. The byte budget bounds persistent descriptor
+  // caching; zero disables caching. Active matches also need working buffers.
+  bool Init(const std::string& metallib_path = {},
+            size_t descriptor_cache_max_bytes = 256ull * 1024 * 1024);
 
   bool Match(const uint8_t* descriptors1, int num_descriptors1,
              const uint8_t* descriptors2, int num_descriptors2,

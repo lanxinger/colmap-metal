@@ -1,10 +1,14 @@
 name: COLMAP (Mac)
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -15,9 +19,27 @@ on:
     types: [ published, edited ]
 
 jobs:
+  format:
+    name: Code format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check code format
+        run: |
+          python3 -m venv .ci-format
+          .ci-format/bin/pip install ruff==0.15.20 clang-format==22.1.5
+          PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/c++.sh --all
+          PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/python.sh --all
+          git diff --name-only
+          git diff --exit-code || (echo "Code formatting failed" && exit 1)
+
   build:
     name: macos-15 arm64 Release ${{ matrix.hash_backend }}
+    needs: format
     runs-on: macos-15
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -35,15 +57,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-
-      - name: Check code format
-        run: |
-          python3 -m venv .ci-format
-          .ci-format/bin/pip install ruff==0.15.20 clang-format==22.1.5
-          PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/c++.sh --all
-          PATH="$PWD/.ci-format/bin:$PATH" ./scripts/format/python.sh --all
-          git diff --name-only
-          git diff --exit-code || (echo "Code formatting failed" && exit 1)
 
       - name: Restore compiler cache
         uses: actions/cache@v6

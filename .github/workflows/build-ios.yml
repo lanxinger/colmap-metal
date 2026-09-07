@@ -1,0 +1,74 @@
+name: COLMAP (iOS package)
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+  pull_request:
+    types: [assigned, opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Apple arm64 package / Xcode 26.3
+    # macos-15 is the standard arm64 runner. Its installed Xcode versions are
+    # documented at actions/runner-images/images/macos/macos-15-arm64-Readme.md.
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      COLMAP_IOS_BUILD_JOBS: 2
+      COLMAP_IOS_CI_ROOT: ${{ github.workspace }}/build-ios/ci
+      COLMAP_IOS_DOWNLOAD_CACHE: ${{ github.workspace }}/build-ios/downloads
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the selected Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.3'
+          cmake --version
+          ninja --version
+          if ! xcrun --sdk macosx metal --version; then
+            xcodebuild -downloadComponent metalToolchain
+          fi
+          for sdk in macosx iphoneos iphonesimulator; do
+            xcrun --sdk "$sdk" metal --version
+          done
+
+      - name: Restore verified dependency downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.COLMAP_IOS_DOWNLOAD_CACHE }}
+          key: ios-source-downloads-v1-${{ hashFiles('scripts/build-ios-dependencies.sh', 'scripts/ci-ios-package.sh') }}
+          restore-keys: ios-source-downloads-v1-
+
+      - name: Build all native slices and validate the Swift package
+        run: bash scripts/ci-ios-package.sh
+
+      - name: Upload build logs and provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: colmap-ios-package-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ env.COLMAP_IOS_CI_ROOT }}/logs
+            ${{ env.COLMAP_IOS_CI_ROOT }}/native/ColmapSparse.xcframework/Info.plist
+            ${{ env.COLMAP_IOS_CI_ROOT }}/native/ColmapSparse.xcframework/BUILD_PROVENANCE.txt
+            ${{ env.COLMAP_IOS_CI_ROOT }}/native/deps/*/dependency-versions.txt
+            ${{ env.COLMAP_IOS_CI_ROOT }}/native/core/*/CMakeCache.txt
+            ${{ env.COLMAP_IOS_CI_ROOT }}/native/core/*/Testing/Temporary/LastTest.log
+            ${{ env.COLMAP_IOS_CI_ROOT }}/native/**/CMakeFiles/CMakeConfigureLog.yaml

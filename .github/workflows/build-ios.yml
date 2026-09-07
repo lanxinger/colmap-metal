@@ -26,7 +26,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       COLMAP_IOS_BUILD_JOBS: 2
-      COLMAP_IOS_CI_ROOT: ${{ github.workspace }}/build-ios/ci
       COLMAP_IOS_DOWNLOAD_CACHE: ${{ github.workspace }}/build-ios/downloads
 
     steps:
@@ -36,6 +35,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Keep derived data and result bundles outside the Swift package
+          # while Xcode resolves the package graph and creates schemes.
+          echo "COLMAP_IOS_CI_ROOT=$RUNNER_TEMP/colmap-ios-ci" >> "$GITHUB_ENV"
           test "$(uname -m)" = arm64
           test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.3'
           cmake --version

@@ -67,6 +67,7 @@ run_logged swift-host swift test --package-path "$repo_dir" \
 # Generic destinations require no simulator runtime or signing credentials.
 # Building the tests forces a final link against each native slice; these are
 # compile/link/resource checks, not iPhone or Simulator runtime tests.
+run_logged swift-schemes xcodebuild -list -json
 for sdk in iphoneos iphonesimulator; do
   destination='generic/platform=iOS'
   [[ "$sdk" != iphonesimulator ]] || destination='generic/platform=iOS Simulator'

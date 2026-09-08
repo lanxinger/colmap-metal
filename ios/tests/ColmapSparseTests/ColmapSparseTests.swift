@@ -83,6 +83,117 @@ struct ColmapSparseTests {
     #expect(options.refine_intrinsics == defaults.refine_intrinsics)
   }
 
+  @Test func cameraPosePreservesColumnMajorCameraToWorldConvention() throws {
+    // A 90-degree turn around world Y, followed by a translation. Camera +Z
+    // points along world +X; its center is the final column, not a w2c offset.
+    let matrix: [Double] = [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 2, 3, 4, 1]
+    let pose = try SparseCameraPose(matrixCameraToWorld: matrix)
+    var native = pose.native
+    let stored = withUnsafeBytes(of: &native.camera_to_world) {
+      Array($0.bindMemory(to: Double.self))
+    }
+    #expect(stored == matrix)
+    #expect(try SparseCameraPose(native: native) == pose)
+    #expect(stored[8] + stored[12] == 3)
+    #expect(stored[9] + stored[13] == 3)
+    #expect(stored[10] + stored[14] == 4)
+  }
+
+  @Test func cameraPoseRejectsNonRigidAndNonfiniteTransforms() throws {
+    let identity: [Double] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    #expect(throws: SparseError.self) {
+      try SparseCameraPose(matrixCameraToWorld: Array(identity.dropLast()))
+    }
+    for (index, invalidValue) in [
+      (0, Double.nan), (12, Double.infinity), (15, 0), (3, 0.01),
+      (0, 2), (4, 0.1), (0, -1),
+    ] {
+      var invalid = identity
+      invalid[index] = invalidValue
+      #expect(throws: SparseError.self) {
+        try SparseCameraPose(matrixCameraToWorld: invalid)
+      }
+    }
+    // ARKit Float32 rotations retain small rounding errors when promoted.
+    let angle = Float.pi / 3
+    let rounded: [Double] = [
+      Double(cos(angle)), Double(sin(angle)), 0, 0,
+      Double(-sin(angle)), Double(cos(angle)), 0, 0,
+      0, 0, 1, 0, 0, 0, 0, 1,
+    ]
+    _ = try SparseCameraPose(matrixCameraToWorld: rounded)
+  }
+
+  @Test func poseRefinementDefaultsAndBounds() throws {
+    let defaults = cm_sparse_default_pose_refinement_options()
+    let options = try SparsePoseRefinementOptions().native
+    #expect(options.struct_size == defaults.struct_size)
+    #expect(options.abi_version == defaults.abi_version)
+    #expect(options.max_num_iterations == defaults.max_num_iterations)
+    #expect(options.max_translation_change == defaults.max_translation_change)
+    #expect(abs(options.max_rotation_change_radians - defaults.max_rotation_change_radians) < 1e-12)
+    #expect(abs(options.max_rotation_change_radians - .pi / 36) < 1e-12)
+    for iterations in [UInt32(0), 101, UInt32.max] {
+      var invalid = SparsePoseRefinementOptions()
+      invalid.maxNumIterations = iterations
+      #expect(throws: SparseError.self) { try invalid.native }
+    }
+    for invalidLimit in [Double.nan, Double.infinity, -1, 0, 10.01] {
+      var invalid = SparsePoseRefinementOptions()
+      invalid.maxTranslationChange = invalidLimit
+      #expect(throws: SparseError.self) { try invalid.native }
+    }
+    for invalidLimit in [Double.nan, Double.infinity, -1, 0, 0.501] {
+      var invalid = SparsePoseRefinementOptions()
+      invalid.maxRotationChangeRadians = invalidLimit
+      #expect(throws: SparseError.self) { try invalid.native }
+    }
+    var maximum = SparsePoseRefinementOptions()
+    maximum.maxNumIterations = 100
+    maximum.maxTranslationChange = 10
+    maximum.maxRotationChangeRadians = 0.5
+    _ = try maximum.native
+  }
+
+  @Test func poseRefinementValidationPreservesExistingOutput() async throws {
+    let fixture = try Fixture(imageCount: 3)
+    defer { fixture.remove() }
+    let images = try fixturePosedImages(fixture.images)
+    let output = fixture.directory.appendingPathComponent("existing")
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+    let sentinel = output.appendingPathComponent("keep.txt")
+    try Data("keep this output".utf8).write(to: sentinel)
+    do {
+      _ = try await SparseReconstructor().refineKnownPoses(images: images, outputDirectory: output)
+      Issue.record("Existing output must be rejected")
+    } catch SparseError.invalidArgument(let message) {
+      #expect(message.contains("already exists"))
+    }
+    #expect(try String(contentsOf: sentinel, encoding: .utf8) == "keep this output")
+
+    let invalidOutput = fixture.directory.appendingPathComponent("invalid-refinement")
+    do {
+      _ = try await SparseReconstructor().refineKnownPoses(
+        images: Array(images.prefix(2)), outputDirectory: invalidOutput)
+      Issue.record("Known-pose refinement requires at least three images")
+    } catch SparseError.invalidArgument {}
+    var options = SparseOptions()
+    options.refineIntrinsics = true
+    do {
+      _ = try await SparseReconstructor().refineKnownPoses(
+        images: images, outputDirectory: invalidOutput, options: options)
+      Issue.record("Known-pose refinement must keep intrinsics fixed")
+    } catch SparseError.invalidArgument {}
+    var refinementOptions = SparsePoseRefinementOptions()
+    refinementOptions.maxNumIterations = 0
+    do {
+      _ = try await SparseReconstructor().refineKnownPoses(
+        images: images, outputDirectory: invalidOutput, refinementOptions: refinementOptions)
+      Issue.record("Out-of-range refinement options must be rejected")
+    } catch SparseError.invalidArgument {}
+    #expect(!FileManager.default.fileExists(atPath: invalidOutput.path))
+  }
+
   @Test func nativeValidationPreservesExistingOutput() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -169,6 +280,52 @@ struct ColmapSparseTests {
         try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).count == 2)
     }
   }
+
+  @Test func poseRefinementCancellationBeforeWorkerExecution() async throws {
+    let fixture = try Fixture(imageCount: 3)
+    defer { fixture.remove() }
+    let images = try fixturePosedImages(fixture.images)
+    let output = fixture.directory.appendingPathComponent("cancelled")
+    let gate = DispatchSemaphore(value: 0)
+    await withCheckedContinuation { (ready: CheckedContinuation<Void, Never>) in
+      SparseReconstructor.workerQueue.async {
+        ready.resume()
+        gate.wait()
+      }
+    }
+    let task = Task {
+      try await SparseReconstructor().refineKnownPoses(images: images, outputDirectory: output)
+    }
+    task.cancel()
+    gate.signal()
+    await expectCancellation(task)
+    #expect(!FileManager.default.fileExists(atPath: output.path))
+    #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).count == 3)
+  }
+
+  @Test func poseRefinementProgressCancellationReleasesJob() async throws {
+    let fixture = try Fixture(imageCount: 3)
+    defer { fixture.remove() }
+    let images = try fixturePosedImages(fixture.images)
+    for index in 0..<3 {
+      let output = fixture.directory.appendingPathComponent("cancelled-refinement-\(index)")
+      let probe = CancellationProbe()
+      let task = Task {
+        try await SparseReconstructor().refineKnownPoses(
+          images: images, outputDirectory: output
+        ) { progress in
+          if progress.stage == .preparing { probe.cancelFromProgress() }
+        }
+      }
+      probe.install(task)
+      await expectCancellation(task)
+      let (called, onMainThread) = probe.snapshot()
+      #expect(called)
+      #expect(!onMainThread)
+      #expect(!FileManager.default.fileExists(atPath: output.path))
+      #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).count == 3)
+    }
+  }
 }
 
 private func fixtureCamera() throws -> SparseCamera {
@@ -177,11 +334,20 @@ private func fixtureCamera() throws -> SparseCamera {
     model: .pinhole(fx: 50, fy: 50, cx: 32, cy: 32))
 }
 
+private func fixturePosedImages(_ images: [SparseImage]) throws -> [SparsePosedImage] {
+  try images.enumerated().map { index, image in
+    let pose = try SparseCameraPose(matrixCameraToWorld: [
+      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, Double(index) * 0.1, 0, 0, 1,
+    ])
+    return SparsePosedImage(image: image, pose: pose)
+  }
+}
+
 private struct Fixture: Sendable {
   let directory: URL
   let images: [SparseImage]
 
-  init() throws {
+  init(imageCount: Int = 2) throws {
     directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("ColmapSparseTests-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -196,7 +362,7 @@ private struct Fixture: Sendable {
       let image = try #require(context.makeImage())
       let camera = try fixtureCamera()
       var inputs: [SparseImage] = []
-      for index in 0..<2 {
+      for index in 0..<imageCount {
         let url = directory.appendingPathComponent("\(index).png")
         let destination = try #require(
           CGImageDestinationCreateWithURL(
@@ -215,7 +381,7 @@ private struct Fixture: Sendable {
   func remove() { try? FileManager.default.removeItem(at: directory) }
 }
 
-private func expectCancellation(_ task: Task<SparseResult, any Error>) async {
+private func expectCancellation<Result: Sendable>(_ task: Task<Result, any Error>) async {
   do {
     _ = try await task.value
     Issue.record("Cancelled operation unexpectedly succeeded")
@@ -227,13 +393,13 @@ private func expectCancellation(_ task: Task<SparseResult, any Error>) async {
 
 private final class CancellationProbe: @unchecked Sendable {
   private let lock = NSLock()
-  private var task: Task<SparseResult, any Error>?
+  private var cancelTask: (@Sendable () -> Void)?
   private var called = false
   private var onMainThread = false
 
-  func install(_ task: Task<SparseResult, any Error>) {
+  func install<Result: Sendable>(_ task: Task<Result, any Error>) {
     lock.lock()
-    self.task = task
+    cancelTask = { task.cancel() }
     if called { task.cancel() }
     lock.unlock()
   }
@@ -242,7 +408,7 @@ private final class CancellationProbe: @unchecked Sendable {
     lock.lock()
     called = true
     onMainThread = Thread.isMainThread
-    task?.cancel()
+    cancelTask?()
     lock.unlock()
   }
 

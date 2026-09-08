@@ -46,6 +46,21 @@ typedef struct cm_sparse_image {
   cm_sparse_camera camera;
 } cm_sparse_image;
 
+// Column-major rigid camera-to-world transform. Camera axes are x right,
+// y down, z forward (COLMAP/OpenCV), and translations use the caller's world
+// units. The last row must be [0, 0, 0, 1].
+typedef struct cm_sparse_pose {
+  double camera_to_world[16];
+} cm_sparse_pose;
+
+typedef struct cm_sparse_pose_refinement_options {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t max_num_iterations;         // 1..100, default 20 per BA solve.
+  double max_translation_change;       // (0, 10] world units, default 0.15.
+  double max_rotation_change_radians;  // (0, 0.5], default 5 degrees.
+} cm_sparse_pose_refinement_options;
+
 typedef struct cm_sparse_options {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -98,6 +113,8 @@ typedef struct cm_sparse_result {
 
 uint32_t cm_sparse_abi_version(void);
 cm_sparse_options cm_sparse_default_options(void);
+cm_sparse_pose_refinement_options cm_sparse_default_pose_refinement_options(
+    void);
 
 // Creates a single-use job, copying inputs/options/paths synchronously. Output
 // must not exist. A successful job atomically publishes images/ and sparse/0/.
@@ -116,6 +133,35 @@ cm_sparse_status cm_sparse_job_create(const cm_sparse_image* images,
                                       cm_sparse_job** job,
                                       char* error_buffer,
                                       size_t error_capacity);
+
+// Refines known poses through feature matching, fixed-pose triangulation, then
+// bundle adjustment. At least three inputs are required; all inputs and poses
+// are copied in capture order. Images must have absent/up EXIF orientation and
+// refine_intrinsics must be zero. The first pose and the pose farthest from it
+// are fixed anchors, preserving the input world frame and metric baseline.
+// Only the largest strongly supported group can move, with its own first and
+// farthest poses fixed. Groups joined through only one camera are treated
+// separately. Other cameras retain their input poses. A failed solve,
+// insufficient supported cameras, or excessive correction rejects the candidate.
+// Successful output retains all input images and fixed camera calibrations.
+cm_sparse_status cm_sparse_job_create_with_poses(
+    const cm_sparse_image* images,
+    const cm_sparse_pose* poses,
+    size_t image_count,
+    const cm_sparse_options* options,
+    const cm_sparse_pose_refinement_options* refinement_options,
+    const char* output_path,
+    const char* metallib_path,
+    cm_sparse_job** job,
+    char* error_buffer,
+    size_t error_capacity);
+
+// Call after a successful known-pose run, before destroying the job. Copies
+// poses in original input order. pose_count must equal the input image count.
+// Returns INVALID_ARGUMENT for a failed/unfinished/ordinary job or wrong count.
+cm_sparse_status cm_sparse_job_copy_refined_poses(const cm_sparse_job* job,
+                                                  cm_sparse_pose* poses,
+                                                  size_t pose_count);
 
 // Synchronous; call on a dedicated background executor. Only one run may use a
 // job. result is populated only on success. No C++ exception crosses this API.

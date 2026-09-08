@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "SiftMetal.h"
+#include "pose_refinement.h"
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
 
@@ -116,6 +117,42 @@ void ValidateOptions(const cm_sparse_options& options) {
           "Options exceed the mobile pilot limits");
 }
 
+void ValidateRefinementOptions(const cm_sparse_pose_refinement_options& options) {
+  Require(options.struct_size == sizeof(options) && options.abi_version == CM_SPARSE_ABI_VERSION,
+          CM_SPARSE_INVALID_ARGUMENT,
+          "Incompatible pose refinement options ABI");
+  Require(options.max_num_iterations >= 1 && options.max_num_iterations <= 100 &&
+              std::isfinite(options.max_translation_change) && options.max_translation_change > 0 &&
+              options.max_translation_change <= 10 &&
+              std::isfinite(options.max_rotation_change_radians) &&
+              options.max_rotation_change_radians > 0 && options.max_rotation_change_radians <= 0.5,
+          CM_SPARSE_INVALID_ARGUMENT,
+          "Pose refinement options exceed the mobile pilot limits");
+}
+
+colmap::Rigid3d MakeCamFromWorld(const cm_sparse_pose& pose) {
+  const Eigen::Map<const Eigen::Matrix4d> matrix(pose.camera_to_world);
+  const Eigen::Matrix3d rotation = matrix.topLeftCorner<3, 3>();
+  Require(
+      matrix.allFinite() &&
+          (matrix.row(3) - Eigen::RowVector4d(0, 0, 0, 1)).cwiseAbs().maxCoeff() <= 1e-8 &&
+          (rotation.transpose() * rotation - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff() <=
+              0.002 &&
+          std::abs(rotation.determinant() - 1) <= 0.002,
+      CM_SPARSE_INVALID_ARGUMENT,
+      "Camera pose must be a finite proper rigid column-major transform");
+  return colmap::Inverse(
+      colmap::Rigid3d(Eigen::Quaterniond(rotation).normalized(), matrix.topRightCorner<3, 1>()));
+}
+
+cm_sparse_pose MakePublicPose(const colmap::Rigid3d& cam_from_world) {
+  cm_sparse_pose pose{};
+  Eigen::Map<Eigen::Matrix4d> matrix(pose.camera_to_world);
+  matrix.setIdentity();
+  matrix.topRows<3>() = colmap::Inverse(cam_from_world).ToMatrix();
+  return pose;
+}
+
 std::vector<std::pair<size_t, size_t>> MakePairs(size_t count, const cm_sparse_options& options) {
   std::vector<std::pair<size_t, size_t>> pairs;
   for (size_t i = 0; i < count; ++i) {
@@ -163,7 +200,7 @@ struct StagingDirectory {
 
 // Inspect encoded dimensions before decoding. EXIF orientation is deliberately
 // not applied: calibration and observations refer to the original raster.
-void CheckRaster(const fs::path& path, const colmap::Camera& camera) {
+void CheckRaster(const fs::path& path, const colmap::Camera& camera, bool require_up) {
   @autoreleasepool {
     NSURL* url = [NSURL fileURLWithPath:@(path.c_str())];
     CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, nullptr);
@@ -171,15 +208,21 @@ void CheckRaster(const fs::path& path, const colmap::Camera& camera) {
     CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
     CFRelease(source);
     size_t width = 0, height = 0;
+    uint32_t orientation = 1;
     if (properties) {
       NSDictionary* values = (__bridge NSDictionary*)properties;
       width = [values[(__bridge NSString*)kCGImagePropertyPixelWidth] unsignedLongLongValue];
       height = [values[(__bridge NSString*)kCGImagePropertyPixelHeight] unsignedLongLongValue];
+      NSNumber* encoded_orientation = values[(__bridge NSString*)kCGImagePropertyOrientation];
+      if (encoded_orientation) orientation = encoded_orientation.unsignedIntValue;
       CFRelease(properties);
     }
     Require(width == camera.width && height == camera.height,
             CM_SPARSE_INVALID_ARGUMENT,
             "Encoded raster dimensions disagree with calibration");
+    Require(!require_up || orientation == 1,
+            CM_SPARSE_INVALID_ARGUMENT,
+            "Known-pose images must have absent or up EXIF orientation");
   }
 }
 
@@ -280,6 +323,10 @@ struct cm_sparse_job {
   cm_sparse_options options;
   std::vector<Input> images;
   std::vector<std::pair<size_t, size_t>> pairs;
+  std::vector<colmap::Rigid3d> initial_cam_from_world;
+  cm_sparse_pose_refinement_options refinement_options{};
+  std::vector<cm_sparse_pose> refined_poses;
+  bool succeeded = false;
   fs::path output_path;
   std::string metallib_path;
   std::atomic<bool> cancelled{false};
@@ -310,7 +357,7 @@ void Prepare(cm_sparse_job& job, const fs::path& image_path, colmap::Database& d
     auto& input = job.images[i];
     const fs::path copy = image_path / input.name;
     fs::copy_file(input.path, copy);
-    CheckRaster(copy, input.camera);
+    CheckRaster(copy, input.camera, !job.initial_cam_from_world.empty());
     auto it = calibrations.find(input.calibration_id);
     colmap::rig_t rig_id;
     if (it == calibrations.end()) {
@@ -483,6 +530,44 @@ std::shared_ptr<colmap::Reconstruction> Map(cm_sparse_job& job,
   return best;
 }
 
+std::shared_ptr<colmap::Reconstruction> RefinePoses(
+    cm_sparse_job& job,
+    const fs::path& image_path,
+    const std::shared_ptr<colmap::Database>& database) {
+  job.Notify(CM_SPARSE_MAPPING, 0, job.images.size());
+  const auto stopped = [&job] { return job.cancelled.load() || job.TimedOut(); };
+  std::vector<colmap::image_t> image_ids;
+  for (const auto& input : job.images) image_ids.push_back(input.image_id);
+  std::shared_ptr<colmap::Reconstruction> reconstruction;
+  try {
+    reconstruction = colmap_sparse::TriangulateAndRefineKnownPoses(database,
+                                                                   image_path,
+                                                                   image_ids,
+                                                                   job.initial_cam_from_world,
+                                                                   job.refinement_options,
+                                                                   job.options.num_threads,
+                                                                   stopped);
+  } catch (const std::runtime_error& error) {
+    job.Check();
+    throw Failure(CM_SPARSE_RECONSTRUCTION_FAILED, error.what());
+  }
+  job.Check();
+  Require(reconstruction->NumRegImages() == job.images.size(),
+          CM_SPARSE_RECONSTRUCTION_FAILED,
+          "Known-pose refinement did not retain every input image");
+  for (const auto& input : job.images) {
+    const auto& image = reconstruction->Image(input.image_id);
+    const auto& camera = *image.CameraPtr();
+    Require(camera.model_id == input.camera.model_id && camera.width == input.camera.width &&
+                camera.height == input.camera.height && camera.params == input.camera.params,
+            CM_SPARSE_RECONSTRUCTION_FAILED,
+            "Known-pose refinement changed camera calibration");
+    job.refined_poses.push_back(MakePublicPose(image.CamFromWorld()));
+  }
+  job.Notify(CM_SPARSE_MAPPING, job.images.size(), job.images.size());
+  return reconstruction;
+}
+
 cm_sparse_result Run(cm_sparse_job& job) {
   StagingDirectory staging(job.output_path.parent_path());
   const fs::path dataset = staging.path / "dataset";
@@ -492,7 +577,8 @@ cm_sparse_result Run(cm_sparse_job& job) {
   Prepare(job, images, *database);
   Extract(job, images, *database);
   Match(job, *database);
-  auto reconstruction = Map(job, images, database);
+  auto reconstruction = job.initial_cam_from_world.empty() ? Map(job, images, database)
+                                                           : RefinePoses(job, images, database);
   database.reset();
   job.Notify(CM_SPARSE_EXPORTING, 0, 1);
   fs::create_directories(dataset / "sparse" / "0");
@@ -551,6 +637,16 @@ cm_sparse_options cm_sparse_default_options(void) {
   options.first_octave = -1;
   options.matching_cache_bytes = 32ull * 1024 * 1024;
   options.minimum_registered_fraction = 0.9;
+  return options;
+}
+
+cm_sparse_pose_refinement_options cm_sparse_default_pose_refinement_options(void) {
+  cm_sparse_pose_refinement_options options{};
+  options.struct_size = sizeof(options);
+  options.abi_version = CM_SPARSE_ABI_VERSION;
+  options.max_num_iterations = 20;
+  options.max_translation_change = 0.15;
+  options.max_rotation_change_radians = 0.08726646259971647;
   return options;
 }
 
@@ -636,6 +732,69 @@ cm_sparse_status cm_sparse_job_create(const cm_sparse_image* images,
   }
 }
 
+cm_sparse_status cm_sparse_job_create_with_poses(
+    const cm_sparse_image* images,
+    const cm_sparse_pose* poses,
+    size_t image_count,
+    const cm_sparse_options* options,
+    const cm_sparse_pose_refinement_options* refinement_options,
+    const char* output_path,
+    const char* metallib_path,
+    cm_sparse_job** output,
+    char* error_buffer,
+    size_t error_capacity) {
+  if (output) *output = nullptr;
+  CopyError("", error_buffer, error_capacity);
+  try {
+    Require(output && poses && options && refinement_options && image_count >= 3 &&
+                options->refine_intrinsics == 0,
+            CM_SPARSE_INVALID_ARGUMENT,
+            "Known-pose refinement needs at least three poses and fixed intrinsics");
+    ValidateRefinementOptions(*refinement_options);
+    cm_sparse_job* created = nullptr;
+    const auto status = cm_sparse_job_create(images,
+                                             image_count,
+                                             options,
+                                             output_path,
+                                             metallib_path,
+                                             &created,
+                                             error_buffer,
+                                             error_capacity);
+    if (status != CM_SPARSE_SUCCESS) return status;
+    std::unique_ptr<cm_sparse_job> job(created);
+    job->refinement_options = *refinement_options;
+    job->initial_cam_from_world.reserve(image_count);
+    for (size_t i = 0; i < image_count; ++i) {
+      job->initial_cam_from_world.push_back(MakeCamFromWorld(poses[i]));
+    }
+    *output = job.release();
+    return CM_SPARSE_SUCCESS;
+  } catch (const Failure& error) {
+    CopyError(error.what(), error_buffer, error_capacity);
+    return error.status;
+  } catch (const std::bad_alloc&) {
+    CopyError("Not enough memory", error_buffer, error_capacity);
+    return CM_SPARSE_RESOURCE_ERROR;
+  } catch (const std::exception& error) {
+    CopyError(error.what(), error_buffer, error_capacity);
+    return CM_SPARSE_INTERNAL_ERROR;
+  } catch (...) {
+    CopyError("Unknown native error", error_buffer, error_capacity);
+    return CM_SPARSE_INTERNAL_ERROR;
+  }
+}
+
+cm_sparse_status cm_sparse_job_copy_refined_poses(const cm_sparse_job* job,
+                                                  cm_sparse_pose* poses,
+                                                  size_t pose_count) {
+  if (!job || !poses || !job->succeeded || job->initial_cam_from_world.empty() ||
+      pose_count != job->images.size() || pose_count != job->refined_poses.size()) {
+    return CM_SPARSE_INVALID_ARGUMENT;
+  }
+  std::copy(job->refined_poses.begin(), job->refined_poses.end(), poses);
+  return CM_SPARSE_SUCCESS;
+}
+
 cm_sparse_status cm_sparse_job_run(cm_sparse_job* job,
                                    cm_sparse_progress_callback progress,
                                    void* context,
@@ -652,6 +811,7 @@ cm_sparse_status cm_sparse_job_run(cm_sparse_job* job,
     @autoreleasepool {
       *result = Run(*job);
     }
+    job->succeeded = true;
     return CM_SPARSE_SUCCESS;
   } catch (const Failure& error) {
     try {

@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 namespace {
-void Require(bool condition, const char* message) {
+void Require(bool condition, const std::string& message) {
   if (!condition) throw std::runtime_error(message);
 }
 
@@ -40,8 +40,12 @@ struct ImageDirectory {
 // feature correspondences, but no 3D points. This exercises the same
 // triangulation/refinement entry point used after mobile feature matching.
 void ReconstructPerturbedPoses(size_t supported_cameras,
-                               bool append_unsupported_camera = false) {
+                               bool append_unsupported_camera = false,
+                               double rotation_error_degrees = 0.5,
+                               double rotation_limit_degrees = 5.0,
+                               bool expect_correction_rejection = false) {
   constexpr size_t kNumPoints = 64;
+  const double degrees_to_radians = std::acos(-1.0) / 180.0;
   const size_t camera_count =
       supported_cameras + size_t(append_unsupported_camera);
   auto database = colmap::Database::Open(colmap::kInMemorySqliteDatabasePath);
@@ -89,7 +93,7 @@ void ReconstructPerturbedPoses(size_t supported_cameras,
           Eigen::Vector3d(i % 2 ? 0.008 : -0.008, 0.006, -0.003);
       initial_world_from_cam.rotation() =
           Eigen::Quaterniond(Eigen::AngleAxisd(
-              0.00872664626,
+              rotation_error_degrees * degrees_to_radians,
               Eigen::Vector3d(1.0, i % 2 ? 2.0 : -2.0, 0.5).normalized())) *
           true_world_from_cam.rotation();
     }
@@ -138,14 +142,35 @@ void ReconstructPerturbedPoses(size_t supported_cameras,
     }
   }
 
-  const auto reconstruction = colmap_sparse::TriangulateAndRefineKnownPoses(
-      database,
-      image_directory.path,
-      image_ids,
-      initial_poses,
-      cm_sparse_default_pose_refinement_options(),
-      1,
-      [] { return false; });
+  auto options = cm_sparse_default_pose_refinement_options();
+  options.max_rotation_change_radians =
+      rotation_limit_degrees * degrees_to_radians;
+  std::shared_ptr<colmap::Reconstruction> reconstruction;
+  try {
+    reconstruction =
+        colmap_sparse::TriangulateAndRefineKnownPoses(database,
+                                                      image_directory.path,
+                                                      image_ids,
+                                                      initial_poses,
+                                                      options,
+                                                      1,
+                                                      [] { return false; });
+  } catch (const std::runtime_error& error) {
+    if (!expect_correction_rejection) throw;
+    Require(std::string(error.what())
+                    .find("exceeded the camera correction limit") !=
+                std::string::npos,
+            "Expected excessive correction rejection, got: " +
+                std::string(error.what()));
+    std::printf(
+        "PASS %.1f degree input error exceeds %.1f degree correction "
+        "limit\n",
+        rotation_error_degrees,
+        rotation_limit_degrees);
+    return;
+  }
+  Require(!expect_correction_rejection,
+          "Refinement must reject a correction above the caller's limit");
   Require(reconstruction->NumRegImages() == camera_count,
           "Refinement must retain every input image");
   Require(reconstruction->RegImageIds() == image_ids,
@@ -154,7 +179,10 @@ void ReconstructPerturbedPoses(size_t supported_cameras,
           "Refinement must retain supplied camera intrinsics");
   Require(reconstruction->NumPoints3D() == kNumPoints &&
               reconstruction->ComputeMeanReprojectionError() < 0.05,
-          "Approximate poses must recover accurate multi-view geometry");
+          "Approximate poses must recover accurate multi-view geometry: " +
+              std::to_string(reconstruction->NumPoints3D()) + " points, " +
+              std::to_string(reconstruction->ComputeMeanReprojectionError()) +
+              " pixel mean reprojection error");
   for (size_t i = 0; i < camera_count; ++i) {
     const auto& image = reconstruction->Image(image_ids[i]);
     const auto& refined = image.CamFromWorld();
@@ -171,20 +199,54 @@ void ReconstructPerturbedPoses(size_t supported_cameras,
               "Interior-camera observations must survive pose initialization");
     }
   }
-  std::printf("PASS %zu supported cameras, %zu retained images\n",
-              supported_cameras,
-              camera_count);
+  std::printf(
+      "PASS %zu supported cameras, %zu retained images, %.1f degree "
+      "input error, %.1f degree correction limit\n",
+      supported_cameras,
+      camera_count,
+      rotation_error_degrees,
+      rotation_limit_degrees);
 }
 }  // namespace
 
 int main() {
-  try {
-    ReconstructPerturbedPoses(3);
-    ReconstructPerturbedPoses(5);
-    ReconstructPerturbedPoses(5, /*append_unsupported_camera=*/true);
-    return 0;
-  } catch (const std::exception& error) {
-    std::fprintf(stderr, "FAIL known-pose reconstruction: %s\n", error.what());
-    return 1;
+  struct TestCase {
+    size_t supported_cameras;
+    bool append_unsupported_camera;
+    double rotation_error_degrees;
+    double rotation_limit_degrees;
+    bool expect_correction_rejection = false;
+  };
+  const std::array<TestCase, 7> tests = {{
+      {3, false, 0.5, 5.0},
+      {5, false, 0.5, 5.0},
+      {5, true, 0.5, 5.0},
+      // Accurate anchors determine the world frame. Matching observations from
+      // the middle camera must survive initialization throughout the configured
+      // correction range, including a caller-supplied range above the default.
+      {3, false, 3.0, 5.0},
+      {3, false, 4.9, 5.0},
+      {3, false, 7.0, 8.0},
+      {3, false, 4.9, 3.0, true},
+  }};
+  size_t failed = 0;
+  for (const auto& test : tests) {
+    try {
+      ReconstructPerturbedPoses(test.supported_cameras,
+                                test.append_unsupported_camera,
+                                test.rotation_error_degrees,
+                                test.rotation_limit_degrees,
+                                test.expect_correction_rejection);
+    } catch (const std::exception& error) {
+      ++failed;
+      std::fprintf(stderr,
+                   "FAIL %zu cameras, %.1f degree input error, %.1f degree "
+                   "correction limit: %s\n",
+                   test.supported_cameras,
+                   test.rotation_error_degrees,
+                   test.rotation_limit_degrees,
+                   error.what());
+    }
   }
+  return failed == 0 ? 0 : 1;
 }

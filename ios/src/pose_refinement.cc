@@ -3,6 +3,7 @@
 
 #include "colmap/controllers/incremental_pipeline.h"
 #include "colmap/estimators/bundle_adjustment_ceres.h"
+#include "colmap/math/math.h"
 #include "colmap/scene/database_cache.h"
 #include "colmap/scene/reconstruction_manager.h"
 #include "colmap/sfm/observation_manager.h"
@@ -308,6 +309,18 @@ std::shared_ptr<colmap::Reconstruction> TriangulateAndRefineKnownPoses(
   // small camera correction recovers the true solution. Keep those tracks for
   // the joint solve; its final filtering checks the refined geometry.
   pipeline_options->ba_global_max_refinements = 0;
+  // Seed tracks must tolerate the rotation that the joint solve is allowed to
+  // correct, in addition to the triangulator's ordinary angular noise margin.
+  // Retriangulation overrides continuation, so keep its threshold no tighter.
+  const double rotation_allowance =
+      colmap::RadToDeg(options.max_rotation_change_radians);
+  auto& triangulation = pipeline_options->triangulation;
+  triangulation.create_max_angle_error += rotation_allowance;
+  triangulation.continue_max_angle_error += rotation_allowance;
+  triangulation.re_max_angle_error =
+      std::max({triangulation.re_max_angle_error,
+                triangulation.create_max_angle_error,
+                triangulation.continue_max_angle_error});
   pipeline_options->ba_sparse_linear_algebra_library_type = "ACCELERATE_SPARSE";
   pipeline_options->ba_dense_linear_algebra_library_type = "EIGEN";
   auto manager = std::make_shared<colmap::ReconstructionManager>();

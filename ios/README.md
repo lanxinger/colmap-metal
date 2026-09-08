@@ -136,6 +136,9 @@ The known-pose route triangulates from the supplied cameras and then refines
 poses and points, skipping incremental camera discovery and normalization.
 Strict reprojection filtering runs after this joint refinement so that input
 pose errors do not remove the tracks needed to correct them.
+Initial triangulation allows the configured rotation correction in addition to
+the ordinary angular matching tolerance. The final reprojection and camera
+correction acceptance limits still apply.
 
 ```swift
 // One encoded-raster camera-to-world matrix per input image, in capture order.

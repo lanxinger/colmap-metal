@@ -4,9 +4,12 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -62,6 +65,136 @@ static bool NoStaging(const fs::path& parent) {
   return true;
 }
 
+static cm_sparse_pose Pose(const double x) {
+  cm_sparse_pose pose{};
+  pose.camera_to_world[0] = std::cos(0.2);
+  pose.camera_to_world[1] = std::sin(0.2);
+  pose.camera_to_world[4] = -std::sin(0.2);
+  pose.camera_to_world[5] = std::cos(0.2);
+  pose.camera_to_world[10] = pose.camera_to_world[15] = 1;
+  pose.camera_to_world[12] = x;
+  pose.camera_to_world[13] = 2;
+  pose.camera_to_world[14] = -3;
+  return pose;
+}
+
+static void KnownPoseBoundaryTests(const std::string& image,
+                                   const cm_sparse_camera& camera,
+                                   const std::string& output,
+                                   const fs::path& root,
+                                   const char* metallib) {
+  std::array<cm_sparse_image, 3> inputs{
+      {{image.c_str(), camera}, {image.c_str(), camera}, {image.c_str(), camera}}};
+  const std::array<cm_sparse_pose, 3> valid_poses = {Pose(1), Pose(1.1), Pose(1.2)};
+  auto poses = valid_poses;
+  auto options = cm_sparse_default_options();
+  const auto defaults = cm_sparse_default_pose_refinement_options();
+  auto refinement = defaults;
+  Check(defaults.struct_size == sizeof(defaults) && defaults.abi_version == CM_SPARSE_ABI_VERSION &&
+            defaults.max_num_iterations == 20 && defaults.max_translation_change == 0.15 &&
+            std::abs(defaults.max_rotation_change_radians - 0.0872664626) < 1e-9,
+        "Unexpected refinement option defaults");
+  std::array<char, 512> error{};
+  const cm_sparse_pose* pose_input = poses.data();
+  size_t image_count = inputs.size();
+  auto create = [&](Job& job) {
+    return cm_sparse_job_create_with_poses(inputs.data(),
+                                           pose_input,
+                                           image_count,
+                                           &options,
+                                           &refinement,
+                                           output.c_str(),
+                                           metallib,
+                                           &job.value,
+                                           error.data(),
+                                           error.size());
+  };
+  auto rejected = [&] {
+    Job job;
+    Check(create(job) == CM_SPARSE_INVALID_ARGUMENT && !job.value && error[0],
+          "Invalid known-pose job accepted or missing diagnostic");
+    Check(!fs::exists(output) && NoStaging(root), "Invalid known-pose job leaked output");
+  };
+  pose_input = nullptr;
+  rejected();
+  pose_input = poses.data();
+  image_count = 2;
+  rejected();
+  image_count = inputs.size();
+  options.refine_intrinsics = 1;
+  rejected();
+  options = cm_sparse_default_options();
+  for (const auto& invalidate :
+       std::vector<std::function<void(cm_sparse_pose_refinement_options&)>>{
+           [](auto& value) { --value.struct_size; },
+           [](auto& value) { ++value.abi_version; },
+           [](auto& value) { value.max_num_iterations = 0; },
+           [](auto& value) { value.max_num_iterations = 101; },
+           [](auto& value) { value.max_translation_change = 0; },
+           [](auto& value) { value.max_translation_change = 10.1; },
+           [](auto& value) {
+             value.max_translation_change = std::numeric_limits<double>::quiet_NaN();
+           },
+           [](auto& value) { value.max_rotation_change_radians = 0; },
+           [](auto& value) { value.max_rotation_change_radians = 0.51; },
+           [](auto& value) {
+             value.max_rotation_change_radians = std::numeric_limits<double>::infinity();
+           }}) {
+    refinement = defaults;
+    invalidate(refinement);
+    rejected();
+  }
+  refinement = defaults;
+  for (const auto& invalidate : std::vector<std::function<void(cm_sparse_pose&)>>{
+           [](auto& pose) { pose.camera_to_world[12] = std::numeric_limits<double>::quiet_NaN(); },
+           [](auto& pose) { pose.camera_to_world[3] = 0.1; },
+           [](auto& pose) { pose.camera_to_world[15] = 0; },
+           [](auto& pose) { pose.camera_to_world[0] *= 2; },
+           [](auto& pose) { pose.camera_to_world[10] = -1; }}) {
+    poses = valid_poses;
+    invalidate(poses[1]);
+    rejected();
+  }
+  poses = valid_poses;
+  std::array<cm_sparse_pose, 3> refined{};
+  Check(cm_sparse_job_copy_refined_poses(nullptr, refined.data(), refined.size()) ==
+            CM_SPARSE_INVALID_ARGUMENT,
+        "Null job exposed refined poses");
+  {
+    Job job;
+    Check(create(job) == CM_SPARSE_SUCCESS, error.data());
+    Check(cm_sparse_job_copy_refined_poses(job.value, refined.data(), refined.size()) ==
+              CM_SPARSE_INVALID_ARGUMENT,
+          "Unfinished job exposed refined poses");
+    Check(cm_sparse_job_copy_refined_poses(job.value, nullptr, refined.size()) ==
+              CM_SPARSE_INVALID_ARGUMENT,
+          "Null pose output accepted");
+    Check(cm_sparse_job_copy_refined_poses(job.value, refined.data(), refined.size() - 1) ==
+              CM_SPARSE_INVALID_ARGUMENT,
+          "Wrong pose output count accepted");
+    cm_sparse_job_cancel(job.value);
+    cm_sparse_result result{};
+    Check(cm_sparse_job_run(job.value, nullptr, nullptr, &result) == CM_SPARSE_CANCELLED,
+          "Known-pose pre-run cancellation failed");
+    Check(cm_sparse_job_copy_refined_poses(job.value, refined.data(), refined.size()) ==
+              CM_SPARSE_INVALID_ARGUMENT,
+          "Cancelled job exposed refined poses");
+    Check(!fs::exists(output) && NoStaging(root), "Known-pose cancellation leaked output");
+  }
+  {
+    Job job;
+    Check(create(job) == CM_SPARSE_SUCCESS, error.data());
+    cm_sparse_result result{};
+    Check(
+        cm_sparse_job_run(job.value, nullptr, nullptr, &result) == CM_SPARSE_RECONSTRUCTION_FAILED,
+        cm_sparse_job_error(job.value));
+    Check(cm_sparse_job_copy_refined_poses(job.value, refined.data(), refined.size()) ==
+              CM_SPARSE_INVALID_ARGUMENT,
+          "Failed job exposed refined poses");
+    Check(!fs::exists(output) && NoStaging(root), "Known-pose failure leaked output");
+  }
+}
+
 static void BoundaryTests(const char* metallib) {
   @autoreleasepool {
     std::string pattern = (fs::temp_directory_path() / "colmap-api-tests-XXXXXX").string();
@@ -113,6 +246,10 @@ static void BoundaryTests(const char* metallib) {
     {
       Job job;
       Check(create(job) == CM_SPARSE_SUCCESS, error.data());
+      std::array<cm_sparse_pose, 2> refined{};
+      Check(cm_sparse_job_copy_refined_poses(job.value, refined.data(), refined.size()) ==
+                CM_SPARSE_INVALID_ARGUMENT,
+            "Ordinary reconstruction job exposed refined poses");
       cm_sparse_job_cancel(job.value);
       cm_sparse_result result{};
       Check(cm_sparse_job_run(job.value, nullptr, nullptr, &result) == CM_SPARSE_CANCELLED,
@@ -157,8 +294,9 @@ static void BoundaryTests(const char* metallib) {
             cm_sparse_job_error(job.value));
       Check(!fs::exists(output) && NoStaging(root), "Mapping failure leaked output");
     }
+    KnownPoseBoundaryTests(image, camera, output, root, metallib);
     std::puts("PASS: ABI validation, calibration, output protection, cancellation, cleanup, "
-              "repeated runs");
+              "repeated runs, known-pose bounds and result access");
   }
 }
 

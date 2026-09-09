@@ -126,6 +126,73 @@ cloud. A model must meet `minimumRegisteredFraction` (90% by default). The
 directory is published atomically without replacing an existing destination;
 failure or cancellation removes the job's working directory.
 
+## Refine an existing camera trajectory
+
+Use `refineKnownPoses` when the capture already supplies calibrated poses. It
+retains every input camera and refines its trajectory in the existing world
+coordinate system. Feature extraction and the bounded sequential/keyframe
+matching schedule still run: bundle adjustment needs verified multi-view tracks.
+The known-pose route triangulates from the supplied cameras and then refines
+poses and points, skipping incremental camera discovery and normalization.
+Strict reprojection filtering runs after this joint refinement so that input
+pose errors do not remove the tracks needed to correct them.
+Initial triangulation allows the configured rotation correction in addition to
+the ordinary angular matching tolerance. The final reprojection and camera
+correction acceptance limits still apply.
+
+```swift
+// One encoded-raster camera-to-world matrix per input image, in capture order.
+precondition(inputs.count == cameraToWorldMatrices.count)
+let posedInputs = try zip(inputs, cameraToWorldMatrices).map { image, matrix in
+    SparsePosedImage(
+        image: image,
+        pose: try SparseCameraPose(matrixCameraToWorld: matrix)
+    )
+}
+let refinementTask = Task {
+    try await SparseReconstructor().refineKnownPoses(
+        images: posedInputs, outputDirectory: newDatasetDirectory
+    )
+}
+let refined = try await refinementTask.value
+// refined.cameraPoses has exactly one result per input, in the same order.
+// refined.reconstruction contains the exported dataset and sparse statistics.
+```
+
+Matrices contain 16 column-major `Double` values and must be finite proper rigid
+transforms. Camera axes are COLMAP/OpenCV: +X right, +Y down, +Z forward. For an
+ARKit camera-to-world matrix `T`, supply `T * diag(1, -1, -1, 1)`; this changes
+camera axes while preserving the world frame and units. Apply the same axis
+flip to a returned matrix to recover ARKit camera axes. Calibration must still
+describe the encoded pixels, and EXIF orientation must be absent or up.
+
+At least three images are required. `SparseOptions.refineIntrinsics` must remain
+false. The first camera and the camera farthest from it are fixed anchors,
+preserving the world frame and baseline; a capture with no usable translation
+baseline is rejected. Only the largest supported camera group can move, with
+at least 12 shared tracks per link and at least three distinct images per track.
+Groups connected through only one camera are treated separately, preventing
+an unanchored group from changing scale around that camera. The selected group
+needs at least three cameras, and its first and farthest cameras are also fixed
+to preserve its metric frame. Capture order breaks equal-size ties. Cameras
+outside that group retain their input poses. The group must retain its support
+after reprojection filtering. Successful output therefore retains every camera
+without claiming that every camera was optimized.
+
+`SparsePoseRefinementOptions` defaults to 20 bundle-adjustment iterations, a
+maximum camera-center change of 0.15 world units (15 cm for meter-based input),
+and a maximum rotation change of exactly 5 degrees (`Double.pi / 36`). Allowed
+ranges are 1–100 iterations, translation in `(0, 10]`, and rotation in `(0, 0.5]`
+radians; both motion limits must be finite. These are acceptance limits: a failed
+solve, increased reprojection error, insufficient tracks, or excessive correction
+rejects the complete candidate without publishing output.
+
+Output protection, resource limits, worker progress, and cancellation follow the
+ordinary reconstruction contract. Call `refinementTask.cancel()` for cooperative
+stop. Poses are copied before releasing the native job. Host tests establish API
+and solver behavior; iPhone latency and downstream Gaussian quality require a
+matched device comparison.
+
 ## Resource defaults
 
 | Setting | Default | Allowed range |

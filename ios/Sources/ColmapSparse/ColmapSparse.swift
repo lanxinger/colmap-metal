@@ -82,6 +82,97 @@ public struct SparseImage: Sendable {
   }
 }
 
+/// A rigid camera-to-world transform in the capture's existing world units.
+/// The 16 values are column-major. Camera axes follow COLMAP/OpenCV: +X right,
+/// +Y down, +Z forward. Convert ARKit's camera axes before constructing this pose.
+public struct SparseCameraPose: Sendable, Equatable {
+  public let matrixCameraToWorld: [Double]
+
+  public init(matrixCameraToWorld matrix: [Double]) throws {
+    guard matrix.count == 16, matrix.allSatisfy(\.isFinite),
+      [3, 7, 11].allSatisfy({ abs(matrix[$0]) <= 1e-8 }),
+      abs(matrix[15] - 1) <= 1e-8
+    else {
+      throw SparseError.invalidArgument("Camera pose must be a finite column-major 4×4 rigid transform.")
+    }
+    for column in 0..<3 {
+      for otherColumn in 0..<3 {
+        let dot = (0..<3).reduce(0.0) {
+          $0 + matrix[column * 4 + $1] * matrix[otherColumn * 4 + $1]
+        }
+        guard abs(dot - (column == otherColumn ? 1 : 0)) <= 0.002 else {
+          throw SparseError.invalidArgument("Camera pose rotation must be orthonormal.")
+        }
+      }
+    }
+    let determinant =
+      matrix[0] * (matrix[5] * matrix[10] - matrix[9] * matrix[6])
+      - matrix[4] * (matrix[1] * matrix[10] - matrix[9] * matrix[2])
+      + matrix[8] * (matrix[1] * matrix[6] - matrix[5] * matrix[2])
+    guard abs(determinant - 1) <= 0.002 else {
+      throw SparseError.invalidArgument("Camera pose rotation must have determinant +1.")
+    }
+    matrixCameraToWorld = matrix
+  }
+
+  var native: cm_sparse_pose {
+    var result = cm_sparse_pose()
+    withUnsafeMutableBytes(of: &result.camera_to_world) { bytes in
+      let destination = bytes.bindMemory(to: Double.self)
+      for (index, value) in matrixCameraToWorld.enumerated() { destination[index] = value }
+    }
+    return result
+  }
+
+  init(native: cm_sparse_pose) throws {
+    var native = native
+    let matrix = withUnsafeBytes(of: &native.camera_to_world) {
+      Array($0.bindMemory(to: Double.self))
+    }
+    try self.init(matrixCameraToWorld: matrix)
+  }
+}
+
+public struct SparsePosedImage: Sendable {
+  public let image: SparseImage
+  public let pose: SparseCameraPose
+
+  public init(image: SparseImage, pose: SparseCameraPose) {
+    self.image = image
+    self.pose = pose
+  }
+}
+
+/// Bounds a fixed-intrinsics refinement initialized from all supplied poses.
+public struct SparsePoseRefinementOptions: Sendable {
+  /// Bundle-adjustment iteration limit, in 1...100.
+  public var maxNumIterations: UInt32 = 20
+  /// Maximum camera-center change in world units; meters for metric ARKit input.
+  /// Must be finite, greater than zero, and at most 10.
+  public var maxTranslationChange: Double = 0.15
+  /// Maximum rotation change in radians, greater than zero and at most 0.5.
+  public var maxRotationChangeRadians: Double = .pi / 36
+
+  public init() {}
+
+  var native: cm_sparse_pose_refinement_options {
+    get throws {
+      guard (1...100).contains(maxNumIterations),
+        maxTranslationChange.isFinite, maxTranslationChange > 0, maxTranslationChange <= 10,
+        maxRotationChangeRadians.isFinite, maxRotationChangeRadians > 0,
+        maxRotationChangeRadians <= 0.5
+      else {
+        throw SparseError.invalidArgument("Pose refinement options exceed the supported bounds.")
+      }
+      var result = cm_sparse_default_pose_refinement_options()
+      result.max_num_iterations = maxNumIterations
+      result.max_translation_change = maxTranslationChange
+      result.max_rotation_change_radians = maxRotationChangeRadians
+      return result
+    }
+  }
+}
+
 /// Native validation rejects values outside the documented resource bounds.
 public struct SparseOptions: Sendable {
   public var maxImageSize: UInt32 = 960
@@ -163,6 +254,13 @@ public struct SparseResult: Sendable {
   }
 }
 
+public struct SparsePoseRefinementResult: Sendable {
+  public let reconstruction: SparseResult
+  /// Refined camera-to-world transforms in exactly the supplied image order,
+  /// preserving the input world coordinate system and units.
+  public let cameraPoses: [SparseCameraPose]
+}
+
 public enum SparseError: Error, Sendable, LocalizedError {
   case invalidArgument(String)
   case resource(String)
@@ -195,6 +293,43 @@ public struct SparseReconstructor: Sendable {
     options: SparseOptions = .init(),
     progress: (@Sendable (SparseProgress) -> Void)? = nil
   ) async throws -> SparseResult {
+    let result = try await execute(
+      images: images, outputDirectory: outputDirectory,
+      options: options, progress: progress)
+    return result.reconstruction
+  }
+
+  /// Triangulates and refines at least three images from their supplied poses.
+  /// Intrinsics remain fixed: `options.refineIntrinsics` must be false. Encoded
+  /// images must have no EXIF rotation. The first and farthest camera poses are
+  /// fixed to retain the existing world frame and metric baseline. Only the
+  /// largest strongly supported camera group can move, with its own two anchors;
+  /// groups joined through only one camera are treated separately, and all
+  /// remaining cameras retain their input poses. Refinement outside the
+  /// configured motion bounds fails instead of publishing a result.
+  /// Output-directory and progress requirements match `reconstruct`.
+  public func refineKnownPoses(
+    images: [SparsePosedImage], outputDirectory: URL,
+    options: SparseOptions = .init(),
+    refinementOptions: SparsePoseRefinementOptions = .init(),
+    progress: (@Sendable (SparseProgress) -> Void)? = nil
+  ) async throws -> SparsePoseRefinementResult {
+    let result = try await execute(
+      images: images.map(\.image), poses: images.map(\.pose),
+      outputDirectory: outputDirectory, options: options,
+      refinementOptions: refinementOptions, progress: progress)
+    return SparsePoseRefinementResult(
+      reconstruction: result.reconstruction, cameraPoses: result.cameraPoses)
+  }
+
+  private typealias RunResult = (reconstruction: SparseResult, cameraPoses: [SparseCameraPose])
+
+  private func execute(
+    images: [SparseImage], poses: [SparseCameraPose]? = nil,
+    outputDirectory: URL, options: SparseOptions,
+    refinementOptions: SparsePoseRefinementOptions = .init(),
+    progress: (@Sendable (SparseProgress) -> Void)?
+  ) async throws -> RunResult {
     try validateFileURL(outputDirectory)
     let state = JobState()
     return try await withTaskCancellationHandler {
@@ -203,8 +338,9 @@ public struct SparseReconstructor: Sendable {
         Self.workerQueue.async {
           do {
             let result = try Self.run(
-              images: images, outputDirectory: outputDirectory,
-              options: options, progress: progress, state: state)
+              images: images, poses: poses, outputDirectory: outputDirectory,
+              options: options, refinementOptions: refinementOptions,
+              progress: progress, state: state)
             continuation.resume(returning: result)
           } catch {
             continuation.resume(throwing: error)
@@ -239,15 +375,25 @@ public struct SparseReconstructor: Sendable {
   }
 
   private static func run(
-    images: [SparseImage], outputDirectory: URL, options: SparseOptions,
+    images: [SparseImage], poses: [SparseCameraPose]?,
+    outputDirectory: URL, options: SparseOptions,
+    refinementOptions: SparsePoseRefinementOptions,
     progress: (@Sendable (SparseProgress) -> Void)?, state: JobState
-  ) throws -> SparseResult {
+  ) throws -> RunResult {
     try state.checkCancellation()
     guard (2...256).contains(images.count), images.count <= options.maxImages else {
       throw SparseError.invalidArgument("Image count must be 2–256 and within maxImages.")
     }
     guard cm_sparse_abi_version() == CM_SPARSE_ABI_VERSION else {
       throw SparseError.internalFailure("ColmapSparse native ABI does not match the Swift package.")
+    }
+    var nativeRefinementOptions = cm_sparse_pose_refinement_options()
+    if let poses {
+      guard poses.count == images.count, images.count >= 3, !options.refineIntrinsics else {
+        throw SparseError.invalidArgument(
+          "Pose refinement requires at least three posed images and fixed intrinsics.")
+      }
+      nativeRefinementOptions = try refinementOptions.native
     }
     let metallib = try metallibURL()
     var paths: [UnsafeMutablePointer<CChar>] = []
@@ -261,13 +407,21 @@ public struct SparseReconstructor: Sendable {
       nativeImages.append(cm_sparse_image(path: UnsafePointer(path), camera: image.camera.native))
     }
     var nativeOptions = options.native
+    let nativePoses = poses?.map(\.native) ?? []
     var job: OpaquePointer?
     var diagnostic = [CChar](repeating: 0, count: 2048)
     let status = outputDirectory.path.withCString { outputPath in
       metallib.path.withCString { metallibPath in
-        cm_sparse_job_create(
-          nativeImages, nativeImages.count, &nativeOptions,
-          outputPath, metallibPath, &job, &diagnostic, diagnostic.count)
+        if poses != nil {
+          return cm_sparse_job_create_with_poses(
+            nativeImages, nativePoses, nativeImages.count,
+            &nativeOptions, &nativeRefinementOptions,
+            outputPath, metallibPath, &job, &diagnostic, diagnostic.count)
+        } else {
+          return cm_sparse_job_create(
+            nativeImages, nativeImages.count, &nativeOptions,
+            outputPath, metallibPath, &job, &diagnostic, diagnostic.count)
+        }
       }
     }
     guard status == CM_SPARSE_SUCCESS, let job else {
@@ -298,7 +452,21 @@ public struct SparseReconstructor: Sendable {
     }
     // Native success includes atomic publication. Late cancellation must
     // still return the completed dataset, whose existence is now committed.
-    return SparseResult(outputDirectory: outputDirectory, native: result)
+    var refinedPoses: [SparseCameraPose] = []
+    if poses != nil {
+      var nativeRefinedPoses = [cm_sparse_pose](repeating: cm_sparse_pose(), count: images.count)
+      guard cm_sparse_job_copy_refined_poses(job, &nativeRefinedPoses, nativeRefinedPoses.count)
+        == CM_SPARSE_SUCCESS
+      else {
+        throw SparseError.internalFailure("Native refinement did not return every input camera pose.")
+      }
+      do {
+        refinedPoses = try nativeRefinedPoses.map { try SparseCameraPose(native: $0) }
+      } catch {
+        throw SparseError.internalFailure("Native refinement returned a malformed camera pose.")
+      }
+    }
+    return (SparseResult(outputDirectory: outputDirectory, native: result), refinedPoses)
   }
 }
 

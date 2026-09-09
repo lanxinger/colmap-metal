@@ -145,6 +145,7 @@ add_library(colmap_sparse STATIC
   "${COLMAP_ROOT}/src/thirdparty/SiftMetal/SiftMetal.mm"
   src/bitmap_apple.mm
   src/colmap_sparse.mm
+  src/pose_refinement.cc
 )
 set_target_properties(colmap_sparse PROPERTIES
   OUTPUT_NAME ColmapSparse
@@ -246,5 +247,27 @@ if(COLMAP_IOS_BUILD_TESTS)
     add_executable(sparse_smoke tests/sparse_smoke.mm)
     target_compile_options(sparse_smoke PRIVATE -fobjc-arc)
     target_link_libraries(sparse_smoke PRIVATE colmap_sparse)
+  endif()
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/pose_refinement_test.cc")
+    add_executable(pose_refinement_test tests/pose_refinement_test.cc)
+    target_include_directories(pose_refinement_test PRIVATE
+      "${COLMAP_ROOT}/src" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_include_directories(pose_refinement_test SYSTEM PRIVATE "${boost_include}")
+    target_compile_definitions(pose_refinement_test PRIVATE
+      COLMAP_HASH_STD EIGEN_MPL2_ONLY GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
+    target_link_libraries(pose_refinement_test PRIVATE colmap_sparse
+                          Eigen3::Eigen glog::glog Ceres::ceres)
+    add_test(NAME pose_refinement_test COMMAND pose_refinement_test)
+  endif()
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/known_pose_reconstruction_test.cc")
+    add_executable(known_pose_reconstruction_test tests/known_pose_reconstruction_test.cc)
+    target_include_directories(known_pose_reconstruction_test PRIVATE
+      "${COLMAP_ROOT}/src" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_include_directories(known_pose_reconstruction_test SYSTEM PRIVATE "${boost_include}")
+    target_compile_definitions(known_pose_reconstruction_test PRIVATE
+      COLMAP_HASH_STD EIGEN_MPL2_ONLY GLOG_VERSION_MAJOR=0 GLOG_VERSION_MINOR=7)
+    target_link_libraries(known_pose_reconstruction_test PRIVATE colmap_sparse
+                          Eigen3::Eigen glog::glog Ceres::ceres)
+    add_test(NAME known_pose_reconstruction_test COMMAND known_pose_reconstruction_test)
   endif()
 endif()

@@ -33,6 +33,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <future>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -328,6 +329,55 @@ TEST(MaybeDownloadAndCacheFile, Nominal) {
   EXPECT_EQ(MaybeDownloadAndCacheFile(uri), cached_file_path);
   EXPECT_EQ(MaybeDownloadAndCacheFile(cached_file_path.string()),
             cached_file_path);
+}
+
+TEST(MaybeDownloadAndCacheFile, ConcurrentCacheDirectoryCreation) {
+  const auto test_dir = CreateTestDir();
+  const std::string data = "concurrent cache creation";
+  const auto server_file_path = test_dir / "server.bin";
+  WriteBinaryBlob(server_file_path, {data.data(), data.size()});
+  const std::string sha256 = ComputeSHA256(data);
+  const std::string url =
+      "file://" + std::filesystem::absolute(server_file_path).string();
+
+  for (int round = 0; round < 4; ++round) {
+    const auto cache_dir = test_dir / std::to_string(round) / "cache";
+    OverwriteDownloadCacheDir(cache_dir);
+    std::promise<void> start;
+    const std::shared_future<void> ready = start.get_future().share();
+    std::vector<std::future<std::filesystem::path>> downloads;
+    for (int i = 0; i < 16; ++i) {
+      // Separate filenames isolate the directory race from concurrent writes
+      // to the same cached file.
+      const std::string uri = url + ";" + std::to_string(i) + ".bin;" + sha256;
+      downloads.push_back(std::async(std::launch::async, [ready, uri]() {
+        ready.wait();
+        return MaybeDownloadAndCacheFile(uri);
+      }));
+    }
+    start.set_value();
+    for (auto& download : downloads) {
+      EXPECT_NO_THROW({
+        const auto cached_path = download.get();
+        EXPECT_EQ(cached_path.parent_path(), cache_dir);
+        std::vector<char> blob;
+        ReadBinaryBlob(cached_path.string(), &blob);
+        EXPECT_EQ(std::string(blob.begin(), blob.end()), data);
+      });
+    }
+  }
+}
+
+TEST(MaybeDownloadAndCacheFile, RejectsNonDirectoryCachePath) {
+  const auto test_dir = CreateTestDir();
+  const auto cache_path = test_dir / "cache";
+  const std::string data = "not a directory";
+  WriteBinaryBlob(cache_path, {data.data(), data.size()});
+  OverwriteDownloadCacheDir(cache_path);
+  const std::string uri = "file://" +
+                          std::filesystem::absolute(cache_path).string() +
+                          ";cached.bin;" + ComputeSHA256(data);
+  EXPECT_ANY_THROW(MaybeDownloadAndCacheFile(uri));
 }
 
 #endif

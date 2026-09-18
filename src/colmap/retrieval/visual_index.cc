@@ -44,7 +44,9 @@
 #include <faiss/Clustering.h>
 #include <faiss/IndexFlat.h>
 #include <faiss/index_io.h>
+#ifdef _OPENMP
 #include <omp.h>
+#endif
 
 namespace colmap {
 namespace retrieval {
@@ -58,11 +60,13 @@ std::unique_ptr<faiss::Index> BuildFaissIndex(
 
 #pragma omp parallel num_threads(1)
   {
+#ifdef _OPENMP
     omp_set_num_threads(GetEffectiveNumThreads(options.num_threads));
 #ifdef _MSC_VER
     omp_set_nested(1);
 #else
     omp_set_max_active_levels(1);
+#endif
 #endif
 
     index->add(visual_words.rows(), visual_words.data());
@@ -631,11 +635,13 @@ class FaissVisualIndex : public VisualIndex {
 
 #pragma omp parallel num_threads(1)
     {
+#ifdef _OPENMP
       omp_set_num_threads(GetEffectiveNumThreads(num_threads));
 #ifdef _MSC_VER
       omp_set_nested(1);
 #else
       omp_set_max_active_levels(1);
+#endif
 #endif
 
       index_->search(descriptors.rows(),

@@ -47,7 +47,7 @@ COLMAP_ADD_LIBRARY(
         Eigen3::Eigen
         CHOLMOD::CHOLMOD
 )
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_optim PUBLIC OpenMP::OpenMP_CXX)
 endif()
 

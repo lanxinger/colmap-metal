@@ -42,13 +42,12 @@
 #include <fstream>
 #include <vector>
 
-#include <omp.h>
-
 #if defined(COLMAP_CGAL_ENABLED)
 #include <CGAL/Delaunay_triangulation_3.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #endif  // COLMAP_CGAL_ENABLED
 #include "colmap/util/ply.h"
+#include "colmap/util/string.h"
 #include "colmap/util/threading.h"
 #include "colmap/util/timer.h"
 
@@ -547,6 +546,7 @@ void WriteDelaunayTriangulationPly(const std::filesystem::path& path,
                                    const Delaunay& triangulation) {
   std::fstream file(path, std::ios::out);
   THROW_CHECK_FILE_OPEN(file, path);
+  SetFullPrecTextStream(file);
 
   file << "ply\n";
   file << "format ascii 1.0\n";

@@ -243,6 +243,12 @@ TwoViewGeometry EstimateCalibratedHomography(
 
   geometry.inlier_matches = ExtractInlierMatches(
       matches, H_report.support.num_inliers, H_report.inlier_mask);
+  if (options.min_inlier_ratio > 0 &&
+      static_cast<double>(H_report.support.num_inliers) / matches.size() <
+          options.min_inlier_ratio) {
+    geometry.config = TwoViewGeometry::ConfigurationType::DEGENERATE;
+    return geometry;
+  }
   if (options.detect_watermark &&
       DetectWatermarkMatches(camera1,
                              matched_img_points1,
@@ -286,10 +292,12 @@ TwoViewGeometry EstimateUncalibratedTwoViewGeometry(
 
   // Estimate epipolar model.
 
-  const auto F_report = EstimateFundamentalMatrix(options,
-                                                  options.ransac_options,
-                                                  matched_img_points1,
-                                                  matched_img_points2);
+  auto ransac_options = options.ransac_options;
+  if (options.min_inlier_ratio > 0) {
+    ransac_options.min_inlier_ratio = options.min_inlier_ratio;
+  }
+  const auto F_report = EstimateFundamentalMatrix(
+      options, ransac_options, matched_img_points1, matched_img_points2);
   geometry.F = F_report.model;
 
   // Estimate planar or panoramic model. Estimated on image points rather than
@@ -299,9 +307,9 @@ TwoViewGeometry EstimateUncalibratedTwoViewGeometry(
 
   // Budget the search for the inlier ratio that the homography must reach
   // to be selected below, since a weaker one is discarded anyway.
-  auto H_ransac_options = options.ransac_options;
+  auto H_ransac_options = ransac_options;
   H_ransac_options.min_inlier_ratio =
-      std::max(options.ransac_options.min_inlier_ratio,
+      std::max(ransac_options.min_inlier_ratio,
                options.max_H_inlier_ratio * F_report.support.num_inliers /
                    matches.size());
   LORANSAC<HomographyMatrixEstimator,
@@ -314,9 +322,8 @@ TwoViewGeometry EstimateUncalibratedTwoViewGeometry(
   geometry.H_estimation_space =
       TwoViewGeometry::HomographyEstimationSpace::PIXEL;
 
-  if ((!F_report.success && !H_report.success) ||
-      (F_report.support.num_inliers < min_num_inliers &&
-       H_report.support.num_inliers < min_num_inliers)) {
+  if ((!F_report.success || F_report.support.num_inliers < min_num_inliers) &&
+      (!H_report.success || H_report.support.num_inliers < min_num_inliers)) {
     geometry.config = TwoViewGeometry::ConfigurationType::DEGENERATE;
     return geometry;
   }
@@ -341,6 +348,12 @@ TwoViewGeometry EstimateUncalibratedTwoViewGeometry(
 
   geometry.inlier_matches =
       ExtractInlierMatches(matches, num_inliers, *best_inlier_mask);
+  if (options.min_inlier_ratio > 0 &&
+      static_cast<double>(num_inliers) / matches.size() <
+          options.min_inlier_ratio) {
+    geometry.config = TwoViewGeometry::ConfigurationType::DEGENERATE;
+    return geometry;
+  }
 
   if (options.detect_watermark && DetectWatermarkMatches(camera1,
                                                          matched_img_points1,
@@ -558,6 +571,8 @@ TwoViewGeometry EstimateSphericalTwoViewGeometry(
 
 bool TwoViewGeometryOptions::Check() const {
   CHECK_OPTION_GE(min_num_inliers, 0);
+  CHECK_OPTION_GE(min_inlier_ratio, 0);
+  CHECK_OPTION_LE(min_inlier_ratio, 1);
   CHECK_OPTION_GE(min_E_F_inlier_ratio, 0);
   CHECK_OPTION_LE(min_E_F_inlier_ratio, 1);
   CHECK_OPTION_GE(max_H_inlier_ratio, 0);
@@ -741,7 +756,11 @@ EstimateRigTwoViewGeometries(
   std::optional<Rigid3d> maybe_pano2_from_pano1;
   size_t num_inliers;
   std::vector<char> inlier_mask;
-  if (!EstimateGeneralizedRelativePose(options.ransac_options,
+  auto ransac_options = options.ransac_options;
+  if (options.min_inlier_ratio > 0) {
+    ransac_options.min_inlier_ratio = options.min_inlier_ratio;
+  }
+  if (!EstimateGeneralizedRelativePose(ransac_options,
                                        points1,
                                        points2,
                                        camera_idxs1,
@@ -753,6 +772,11 @@ EstimateRigTwoViewGeometries(
                                        &num_inliers,
                                        &inlier_mask) ||
       num_inliers < static_cast<size_t>(options.min_num_inliers)) {
+    return {};
+  }
+  if (options.min_inlier_ratio > 0 &&
+      static_cast<double>(num_inliers) / corrs.size() <
+          options.min_inlier_ratio) {
     return {};
   }
 
@@ -1083,10 +1107,9 @@ TwoViewGeometry EstimateCalibratedTwoViewGeometry(
           ? TwoViewGeometry::HomographyEstimationSpace::PIXEL
           : TwoViewGeometry::HomographyEstimationSpace::CAMERA_RAY;
 
-  if ((!E_report.success && !F_report.success && !H_report.success) ||
-      (E_report.support.num_inliers < min_num_inliers &&
-       F_report.support.num_inliers < min_num_inliers &&
-       H_report.support.num_inliers < min_num_inliers)) {
+  if ((!E_report.success || E_report.support.num_inliers < min_num_inliers) &&
+      (!F_report.success || F_report.support.num_inliers < min_num_inliers) &&
+      (!H_report.success || H_report.support.num_inliers < min_num_inliers)) {
     geometry.config = TwoViewGeometry::ConfigurationType::DEGENERATE;
     return geometry;
   }
@@ -1254,9 +1277,8 @@ TwoViewGeometry EstimateSharedFocalTwoViewGeometry(
   geometry.H_estimation_space =
       TwoViewGeometry::HomographyEstimationSpace::PIXEL;
 
-  if ((!SF_report.success && !H_report.success) ||
-      (SF_report.support.num_inliers < min_num_inliers &&
-       H_report.support.num_inliers < min_num_inliers)) {
+  if ((!SF_report.success || SF_report.support.num_inliers < min_num_inliers) &&
+      (!H_report.success || H_report.support.num_inliers < min_num_inliers)) {
     geometry.config = TwoViewGeometry::ConfigurationType::DEGENERATE;
     return geometry;
   }
@@ -1465,9 +1487,9 @@ TwoViewGeometry EstimateOneSidedFocalTwoViewGeometry(
         TwoViewGeometry::HomographyEstimationSpace::PIXEL;
   }
 
-  if ((!focal_report.success && !H_report.success) ||
-      (focal_report.support.num_inliers < min_num_inliers &&
-       H_report.support.num_inliers < min_num_inliers)) {
+  if ((!focal_report.success ||
+       focal_report.support.num_inliers < min_num_inliers) &&
+      (!H_report.success || H_report.support.num_inliers < min_num_inliers)) {
     geometry.config = TwoViewGeometry::ConfigurationType::DEGENERATE;
     return geometry;
   }

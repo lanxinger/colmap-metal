@@ -484,7 +484,16 @@ void Match(cm_sparse_job& job, colmap::Database& database) {
                        &geometry);
       }
       database.WriteMatches(first.image_id, second.image_id, matches);
-      database.WriteTwoViewGeometry(first.image_id, second.image_id, geometry);
+      // Match the desktop verifier's storage contract: skipped pairs have no
+      // geometry row, and rejected pairs retain only their diagnosis.
+      if (geometry.config != colmap::TwoViewGeometry::UNDEFINED) {
+        if (geometry.config == colmap::TwoViewGeometry::DEGENERATE ||
+            geometry.inlier_matches.size() < size_t(geometry_options.min_num_inliers)) {
+          geometry = colmap::TwoViewGeometry();
+          geometry.config = colmap::TwoViewGeometry::DEGENERATE;
+        }
+        database.WriteTwoViewGeometry(first.image_id, second.image_id, geometry);
+      }
     }
     job.Notify(CM_SPARSE_MATCHING, i + 1, job.pairs.size());
   }

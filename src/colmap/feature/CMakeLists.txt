@@ -89,7 +89,7 @@ elseif(GPU_ENABLED)
     endif()
 endif()
 
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_feature PRIVATE OpenMP::OpenMP_CXX)
 endif()
 

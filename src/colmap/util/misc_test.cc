@@ -185,6 +185,11 @@ TEST(CSVToVector, StringWithSpaces) {
   EXPECT_EQ(list[2], "test");
 }
 
+TEST(VectorToCSV, DoublePrecisionRoundTrip) {
+  const std::vector<double> values = {0.12345678901234568, 123456789.01234567};
+  EXPECT_EQ(CSVToVector<double>(VectorToCSV(values)), values);
+}
+
 TEST(VectorToCSV, Nominal) {
   EXPECT_EQ(VectorToCSV<int>({}), "");
   EXPECT_EQ(VectorToCSV<int>({1}), "1");

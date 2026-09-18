@@ -111,6 +111,6 @@ COLMAP_ADD_LIBRARY(
     NAME colmap_vlfeat
     SRCS ${VLFEAT_SOURCE_FILES}
 )
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_vlfeat PRIVATE OpenMP::OpenMP_C)
 endif()

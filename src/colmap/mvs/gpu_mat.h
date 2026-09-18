@@ -33,6 +33,7 @@
 #include "colmap/util/cudacc.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/logging.h"
+#include "colmap/util/string.h"
 
 #include <fstream>
 
@@ -264,6 +265,7 @@ template <typename T>
 void GpuMat<T>::Read(const std::filesystem::path& path) {
   std::fstream text_file(path, std::ios::in | std::ios::binary);
   THROW_CHECK(text_file.is_open()) << "Could not open " << path;
+  SetFullPrecTextStream(text_file);
 
   size_t width;
   size_t height;
@@ -295,6 +297,7 @@ void GpuMat<T>::Write(const std::filesystem::path& path) {
 
   std::fstream text_file(path, std::ios::out);
   THROW_CHECK(text_file.is_open()) << "Could not open " << path;
+  SetFullPrecTextStream(text_file);
   text_file << width_ << "&" << height_ << "&" << depth_ << "&";
   text_file.close();
 
@@ -319,6 +322,7 @@ void GpuMat<T>::Write(const std::filesystem::path& path, const size_t slice) {
 
   std::fstream text_file(path, std::ios::out);
   THROW_CHECK(text_file.is_open()) << "Could not open " << path;
+  SetFullPrecTextStream(text_file);
   text_file << width_ << "&" << height_ << "&" << 1 << "&";
   text_file.close();
 

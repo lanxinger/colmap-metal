@@ -10,7 +10,7 @@ COLMAP_ADD_LIBRARY(
 )
 target_compile_definitions(colmap_poisson_recon PRIVATE RELEASE)
 target_include_directories(colmap_poisson_recon PRIVATE .)
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_poisson_recon PRIVATE OpenMP::OpenMP_CXX)
 endif()
 if(MSVC)

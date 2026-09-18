@@ -41,7 +41,6 @@
 #include <vector>
 
 #include <Eigen/Dense>
-#include <omp.h>
 
 namespace colmap {
 namespace mvs {

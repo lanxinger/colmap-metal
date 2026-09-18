@@ -44,6 +44,8 @@
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/eigen_alignment.h"
 
+#include <random>
+
 #include <Eigen/Core>
 #include <gtest/gtest.h>
 
@@ -390,6 +392,55 @@ TwoViewGeometryTestData CreateTwoViewGeometryTestData(
                           data.matches);
 
   return data;
+}
+
+TEST(TwoViewGeometryOptions, CheckMinInlierRatioBounds) {
+  TwoViewGeometryOptions options;
+  EXPECT_TRUE(options.Check());
+  options.min_inlier_ratio = -0.1;
+  EXPECT_FALSE(options.Check());
+  options.min_inlier_ratio = 1.1;
+  EXPECT_FALSE(options.Check());
+  options.min_inlier_ratio = 1.0;
+  EXPECT_TRUE(options.Check());
+}
+
+TEST(EstimateTwoViewGeometry, RejectsLowRatioUncalibratedAndForcedHomography) {
+  Camera camera1 = Camera::CreateFromModelId(
+      1, SimplePinholeCameraModel::model_id, 1000, 1000, 1000);
+  Camera camera2 = camera1;
+  camera2.camera_id = 2;
+  std::mt19937 prng(42);
+  std::uniform_real_distribution<double> uniform(100, 900);
+  std::vector<Eigen::Vector2d> points1;
+  std::vector<Eigen::Vector2d> points2;
+  FeatureMatches matches;
+  for (point2D_t i = 0; i < 100; ++i) {
+    points1.emplace_back(uniform(prng), uniform(prng));
+    if (i < 40) {
+      points2.emplace_back(points1.back() + Eigen::Vector2d(20, 10));
+    } else {
+      points2.emplace_back(uniform(prng), uniform(prng));
+    }
+    matches.emplace_back(i, i);
+  }
+  for (bool force_h : {false, true}) {
+    SCOPED_TRACE(force_h);
+    TwoViewGeometryOptions options;
+    options.force_H_use = force_h;
+    options.detect_watermark = false;
+    options.ransac_options.random_seed = 42;
+    options.ransac_options.min_num_trials = 1000;
+    const auto accepted = EstimateTwoViewGeometry(
+        camera1, points1, camera2, points2, matches, options);
+    ASSERT_NE(accepted.config, TwoViewGeometry::DEGENERATE);
+    ASSERT_GE(accepted.inlier_matches.size(), 40);
+    ASSERT_LT(accepted.inlier_matches.size(), 50);
+    options.min_inlier_ratio = 0.5;
+    const auto rejected = EstimateTwoViewGeometry(
+        camera1, points1, camera2, points2, matches, options);
+    EXPECT_EQ(rejected.config, TwoViewGeometry::DEGENERATE);
+  }
 }
 
 TEST(EstimateTwoViewGeometry, Spherical) {
@@ -1574,6 +1625,43 @@ TEST(EstimateRigTwoViewGeometries, Nominal) {
             /*ttol=*/1e-3));
     EXPECT_GT(geometry.inlier_matches.size(), 0);
   }
+}
+
+TEST(EstimateRigTwoViewGeometries, RejectsLowAggregateInlierRatio) {
+  SetPRNGSeed(1);
+  SyntheticDatasetOptions dataset_options;
+  dataset_options.num_rigs = 2;
+  dataset_options.num_cameras_per_rig = 3;
+  dataset_options.num_frames_per_rig = 1;
+  dataset_options.num_points3D = 100;
+  dataset_options.inlier_match_ratio = 0.75;
+  dataset_options.camera_has_prior_focal_length = true;
+  const auto data = CreateRigTwoViewGeometryTestData(dataset_options);
+  TwoViewGeometryOptions options;
+  options.ransac_options.random_seed = 42;
+  options.ransac_options.min_num_trials = 1000;
+  auto estimate = [&]() {
+    return EstimateRigTwoViewGeometries(data.rig1,
+                                        data.rig2,
+                                        data.reconstruction.Images(),
+                                        data.reconstruction.Cameras(),
+                                        data.matches,
+                                        options);
+  };
+  const auto accepted = estimate();
+  ASSERT_FALSE(accepted.empty());
+  size_t num_matches = 0;
+  size_t num_inliers = 0;
+  for (const auto& pair : data.matches) {
+    num_matches += pair.second.size();
+  }
+  for (const auto& pair : accepted) {
+    num_inliers += pair.second.inlier_matches.size();
+  }
+  ASSERT_GT(num_inliers, options.min_num_inliers);
+  ASSERT_LT(static_cast<double>(num_inliers) / num_matches, 0.95);
+  options.min_inlier_ratio = 0.95;
+  EXPECT_TRUE(estimate().empty());
 }
 
 TEST(EstimateMultipleTwoViewGeometries, SingleGeometry) {

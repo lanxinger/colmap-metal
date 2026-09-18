@@ -60,7 +60,7 @@ COLMAP_ADD_LIBRARY(
 if(CGAL_ENABLED)
     target_link_libraries(colmap_mvs PRIVATE CGAL)
 endif()
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_mvs PRIVATE OpenMP::OpenMP_CXX)
 endif()
 

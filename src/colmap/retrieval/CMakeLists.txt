@@ -52,7 +52,7 @@ COLMAP_ADD_LIBRARY(
         colmap_optim
         faiss
 )
-if(OPENMP_FOUND)
+if(OPENMP_ENABLED AND OPENMP_FOUND)
     target_link_libraries(colmap_retrieval PUBLIC OpenMP::OpenMP_CXX)
 endif()
 

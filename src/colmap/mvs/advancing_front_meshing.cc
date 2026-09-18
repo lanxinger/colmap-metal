@@ -69,7 +69,9 @@
 #include <CGAL/Surface_mesh.h>
 #include <CGAL/boost/graph/Euler_operations.h>
 #include <boost/functional/hash.hpp>
+#ifdef _OPENMP
 #include <omp.h>
+#endif
 
 namespace {
 
@@ -415,12 +417,21 @@ colmap::PlyMesh ReconstructBlock(
     LOG(INFO) << "Pre-filtering: casting " << rays.size()
               << " visibility rays...";
     const AFSRRayCaster ray_caster(triangulation);
+#ifdef _OPENMP
     const int num_omp_threads = omp_get_max_threads();
+#else
+    const int num_omp_threads = 1;
+#endif
     std::vector<VisibilityCounter> thread_counters(num_omp_threads);
 #pragma omp parallel
     {
       std::vector<AFSRTriangulation::Facet> intersections;
-      auto& local_counter = thread_counters[omp_get_thread_num()];
+#ifdef _OPENMP
+      const int thread_index = omp_get_thread_num();
+#else
+      const int thread_index = 0;
+#endif
+      auto& local_counter = thread_counters[thread_index];
       const int64_t num_rays = static_cast<int64_t>(rays.size());
 #pragma omp for schedule(dynamic)
       for (int64_t i = 0; i < num_rays; ++i) {
@@ -465,14 +476,23 @@ colmap::PlyMesh ReconstructBlock(
     LOG(INFO) << "Post-filtering: casting " << rays.size()
               << " visibility rays through mesh...";
     AABBTree tree(faces(mesh).first, faces(mesh).second, mesh);
+#ifdef _OPENMP
     const int num_omp_threads = omp_get_max_threads();
+#else
+    const int num_omp_threads = 1;
+#endif
     using FaceIndex = SurfaceMesh::Face_index;
     std::vector<colmap::NodeHashMap<FaceIndex, int>> thread_counters(
         num_omp_threads);
 #pragma omp parallel
     {
       std::vector<AABBTree::Primitive_id> primitives;
-      auto& local_counter = thread_counters[omp_get_thread_num()];
+#ifdef _OPENMP
+      const int thread_index = omp_get_thread_num();
+#else
+      const int thread_index = 0;
+#endif
+      auto& local_counter = thread_counters[thread_index];
       const int64_t num_rays = static_cast<int64_t>(rays.size());
 #pragma omp for schedule(dynamic)
       for (int64_t i = 0; i < num_rays; ++i) {
@@ -755,13 +775,15 @@ colmap::PlyMesh ReconstructBlocks(
     }
 
     thread_pool.AddTask([&, block_idx]() {
-      // Disable OMP parallelism within each block task to avoid
-      // oversubscription since ThreadPool handles inter-block parallelism.
+    // Disable OMP parallelism within each block task to avoid
+    // oversubscription since ThreadPool handles inter-block parallelism.
+#ifdef _OPENMP
       omp_set_num_threads(1);
 #ifdef _MSC_VER
       omp_set_nested(0);
 #else
       omp_set_max_active_levels(1);
+#endif
 #endif
 
       const auto& indices = block_point_indices[block_idx];
@@ -890,11 +912,13 @@ void AdvancingFrontMeshing(const AdvancingFrontMeshingOptions& options,
     }
 #pragma omp parallel num_threads(1)
     {
+#ifdef _OPENMP
       omp_set_num_threads(GetEffectiveNumThreads(options.num_threads));
 #ifdef _MSC_VER
       omp_set_nested(1);
 #else
       omp_set_max_active_levels(1);
+#endif
 #endif
       mesh = ReconstructBlock(ply_points, rays, options);
     }

@@ -95,6 +95,20 @@ TEST(PlyMeshFace, ParameterizedConstructor) {
   EXPECT_EQ(face.vertex_idx3, 30);
 }
 
+TEST(Ply, TextPreservesFloatPrecision) {
+  const auto path = CreateTestDir() / "precise.ply";
+  PlyPoint point;
+  point.x = 0.123456789f;
+  point.y = 123456.789f;
+  point.z = -0.987654321f;
+  WriteTextPlyPoints(path, {point}, false, false);
+  const auto loaded = ReadPly(path);
+  ASSERT_EQ(loaded.size(), 1);
+  EXPECT_EQ(loaded[0].x, point.x);
+  EXPECT_EQ(loaded[0].y, point.y);
+  EXPECT_EQ(loaded[0].z, point.z);
+}
+
 TEST(Ply, RoundTripTextPlyPointsFullData) {
   const auto test_dir = CreateTestDir();
   const auto test_file = test_dir / "test.ply";

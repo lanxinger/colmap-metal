@@ -141,7 +141,7 @@ bool RelativePoseOneSidedFocalEstimator::Refine(
   THROW_CHECK_GE(img_points1.size(), kMinNumSamples);
   THROW_CHECK_NOTNULL(model);
 
-  if (!(model->focal > 0.0)) {
+  if (model->focal <= 0.0 || !std::isfinite(model->focal)) {
     return false;
   }
 
@@ -182,7 +182,9 @@ bool RelativePoseOneSidedFocalEstimator::Refine(
   x.head<4>() = cam2_from_cam1.rotation().normalized().coeffs();
   x.segment<3>(4) = cam2_from_cam1.translation().normalized();
   x[7] = std::log(model->focal);
-  solver.Solve(f, &x, options);
+  if (solver.Solve(f, &x, options).status == Solver::NUMERICAL_FAILURE) {
+    return false;
+  }
 
   // Keep the refined estimate only if the solve stayed finite and left a
   // non-degenerate baseline; otherwise fall back to the decomposed pose and

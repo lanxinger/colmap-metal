@@ -280,6 +280,34 @@ TEST(RelativePoseSharedFocalEstimator, RefineFromInitialModel) {
   }
 }
 
+TEST(RelativePoseSharedFocalEstimator, RefineRejectsNonFiniteFocal) {
+  SetPRNGSeed(0);
+  const Rigid3d cam2_from_cam1 = TestCam2FromCam1();
+  std::vector<Eigen::Vector2d> points1;
+  std::vector<Eigen::Vector2d> points2;
+  RandomSharedFocalCorrespondences(cam2_from_cam1,
+                                   1000.0,
+                                   30,
+                                   /*reject_degenerate=*/false,
+                                   points1,
+                                   points2);
+  const Eigen::Matrix3d E = EssentialMatrixFromPose(cam2_from_cam1);
+  for (const double focal : {std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+    M_t model;
+    model.E = E;
+    model.focal = focal;
+    EXPECT_FALSE(
+        RelativePoseSharedFocalEstimator::Refine(points1, points2, &model));
+    EXPECT_EQ(model.E, E);
+    if (std::isnan(focal)) {
+      EXPECT_TRUE(std::isnan(model.focal));
+    } else {
+      EXPECT_EQ(model.focal, focal);
+    }
+  }
+}
+
 // A relative pose whose two optical axes intersect at a common fixation point
 // on cam1's +z axis, so the axes are coplanar. cam1 sits at distance
 // |fixation| from that point and cam2 at dist2, so the configuration is

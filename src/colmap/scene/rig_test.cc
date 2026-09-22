@@ -29,12 +29,15 @@
 
 #include "colmap/scene/rig.h"
 
+#include "colmap/geometry/rigid3_matchers.h"
+#include "colmap/math/random.h"
 #include "colmap/scene/database_sqlite.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/testing.h"
 
 #include <fstream>
 #include <locale>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -438,6 +441,108 @@ TEST(ApplyRigConfig, WithUnconfiguredSingleAndConfiguredMultiCameraRigs) {
     num_non_trivial_frames += rig.NumDataIds() > 1;
   }
   EXPECT_EQ(num_non_trivial_frames, 5);
+}
+
+TEST(ApplyRigConfig, PrefersRefSensorForFramePoses) {
+  // Exercise reference sensors both before and after non-reference sensors.
+  for (const camera_t ref_camera_id : {1, 2}) {
+    SCOPED_TRACE(ref_camera_id);
+    SetPRNGSeed(0);
+    auto database = Database::Open(kInMemorySqliteDatabasePath);
+    Reconstruction reconstruction;
+    SyntheticDatasetOptions options;
+    options.num_rigs = 2;
+    options.num_cameras_per_rig = 1;
+    options.num_frames_per_rig = 5;
+    SynthesizeDataset(options, &reconstruction, database.get());
+
+    // The two images grouped into each frame have independently estimated,
+    // inconsistent poses. Conversion must retain the reference image's pose.
+    NodeHashMap<std::string, Rigid3d> ref_name_to_cam_from_world;
+    for (const auto& [_, image] : reconstruction.Images()) {
+      if (image.CameraId() == ref_camera_id) {
+        ref_name_to_cam_from_world.emplace(image.Name(), image.CamFromWorld());
+      }
+    }
+    ASSERT_EQ(ref_name_to_cam_from_world.size(), 5);
+
+    std::vector<RigConfig> configs(1);
+    auto& cameras = configs[0].cameras;
+    cameras.resize(2);
+    cameras[0].image_prefix = "camera000001_";
+    cameras[0].ref_sensor = ref_camera_id == 1;
+    cameras[1].image_prefix = "camera000002_";
+    cameras[1].ref_sensor = ref_camera_id == 2;
+    if (ref_camera_id == 2) {
+      // Rig configuration requires the reference sensor to be listed first;
+      // frame traversal remains ordered by sensor ID.
+      std::swap(cameras[0], cameras[1]);
+    }
+
+    ApplyRigConfig(configs, *database, &reconstruction);
+    EXPECT_EQ(reconstruction.NumRigs(), 1);
+    EXPECT_EQ(reconstruction.NumFrames(), 5);
+    for (const auto& [_, image] : reconstruction.Images()) {
+      if (image.CameraId() == ref_camera_id) {
+        EXPECT_THAT(image.CamFromWorld(),
+                    Rigid3dNear(ref_name_to_cam_from_world.at(image.Name()),
+                                /*rtol=*/1e-6,
+                                /*ttol=*/1e-6));
+      }
+    }
+  }
+}
+
+TEST(ApplyRigConfig, UsesFirstPosedSensorWhenReferenceIsUnposed) {
+  SetPRNGSeed(0);
+  auto database = Database::Open(kInMemorySqliteDatabasePath);
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions options;
+  options.num_rigs = 3;
+  options.num_cameras_per_rig = 1;
+  options.num_frames_per_rig = 2;
+  SynthesizeDataset(options, &reconstruction, database.get());
+
+  NodeHashMap<image_t, Rigid3d> original_poses;
+  for (const auto& [image_id, image] : reconstruction.Images()) {
+    if (image.CameraId() == 1) {
+      reconstruction.DeRegisterFrame(image.FrameId());
+    } else {
+      original_poses.emplace(image_id, image.CamFromWorld());
+    }
+  }
+
+  std::vector<RigConfig> configs(1);
+  auto& cameras = configs[0].cameras;
+  cameras.resize(3);
+  cameras[0].image_prefix = "camera000001_";
+  cameras[0].ref_sensor = true;
+  cameras[1].image_prefix = "camera000002_";
+  cameras[1].cam_from_rig =
+      Rigid3d(Eigen::Quaterniond::Identity(), Eigen::Vector3d(1, 0, 0));
+  cameras[2].image_prefix = "camera000003_";
+  cameras[2].cam_from_rig =
+      Rigid3d(Eigen::Quaterniond::Identity(), Eigen::Vector3d(2, 0, 0));
+
+  ApplyRigConfig(configs, *database, &reconstruction);
+  ASSERT_EQ(reconstruction.NumFrames(), 2);
+  EXPECT_EQ(reconstruction.NumRegFrames(), 2);
+  for (const auto& [_, frame] : reconstruction.Frames()) {
+    ASSERT_TRUE(frame.HasPose());
+    for (const data_t& data_id : frame.ImageIds()) {
+      const auto it = original_poses.find(data_id.id);
+      if (it != original_poses.end()) {
+        EXPECT_THAT(
+            frame.RigFromWorld(),
+            Rigid3dNear(
+                Inverse(frame.RigPtr()->SensorFromRig(data_id.sensor_id)) *
+                    it->second,
+                /*rtol=*/1e-6,
+                /*ttol=*/1e-6));
+        break;
+      }
+    }
+  }
 }
 
 }  // namespace

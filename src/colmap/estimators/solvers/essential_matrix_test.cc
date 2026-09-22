@@ -36,6 +36,8 @@
 #include "colmap/scene/camera.h"
 #include "colmap/util/eigen_alignment.h"
 
+#include <limits>
+
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <gtest/gtest.h>
@@ -225,6 +227,25 @@ TEST(EssentialMatrixTangentSampsonEstimator, RefineRecoversPose) {
     EXPECT_LT(dist(E), 1e-4);
     EXPECT_LT(dist(E), init_dist);
   }
+}
+
+TEST(EssentialMatrixTangentSampsonEstimator, RejectsNonFiniteJacobian) {
+  SetPRNGSeed(0);
+  const Camera camera = Camera::CreateFromModelId(
+      1, CameraModelId::kEquirectangular, /*focal_length=*/0.0, 1000, 500);
+  const Rigid3d cam2_from_cam1 = TestCam2FromCam1();
+  std::vector<Eigen::Vector3d> rays1;
+  std::vector<Eigen::Vector3d> rays2;
+  RandomEpipolarCorrespondences(
+      cam2_from_cam1, 50, /*reject_degenerate=*/false, rays1, rays2);
+  std::vector<CamRayWithJac> crj1 = WithJacobians(camera, rays1);
+  const std::vector<CamRayWithJac> crj2 = WithJacobians(camera, rays2);
+  crj1[0].jacobian.setConstant(std::numeric_limits<double>::quiet_NaN());
+  const Eigen::Matrix3d original = EssentialMatrixFromPose(cam2_from_cam1);
+  Eigen::Matrix3d E = original;
+
+  EXPECT_FALSE(EssentialMatrixTangentSampsonEstimator::Refine(crj1, crj2, &E));
+  EXPECT_EQ(E, original);
 }
 
 // The LO-RANSAC estimator recovers the pose despite 30% gross outliers.

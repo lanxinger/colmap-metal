@@ -39,6 +39,7 @@
 #include "colmap/util/eigen_alignment.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 
@@ -317,6 +318,36 @@ TEST(RelativePoseOneSidedFocalEstimator, RefineFromInitialModel) {
                               /*E_eps=*/1e-3,
                               /*focal_rel_eps=*/1e-2,
                               /*r_eps=*/1e-2));
+  }
+}
+
+TEST(RelativePoseOneSidedFocalEstimator, RefineRejectsNonFiniteFocal) {
+  SetPRNGSeed(0);
+  const Camera camera2 = TestCamera2();
+  const Rigid3d cam2_from_cam1 = TestCam2FromCam1();
+  std::vector<Eigen::Vector2d> points1;
+  std::vector<CamRayWithJac> cam_rays2_with_jac;
+  RandomOneSidedFocalCorrespondences(cam2_from_cam1,
+                                     camera2,
+                                     kFocal1,
+                                     30,
+                                     /*reject_degenerate=*/false,
+                                     points1,
+                                     cam_rays2_with_jac);
+  const Eigen::Matrix3d E = EssentialMatrixFromPose(cam2_from_cam1);
+  for (const double focal : {std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+    M_t model;
+    model.E = E;
+    model.focal = focal;
+    EXPECT_FALSE(RelativePoseOneSidedFocalEstimator::Refine(
+        points1, cam_rays2_with_jac, &model));
+    EXPECT_EQ(model.E, E);
+    if (std::isnan(focal)) {
+      EXPECT_TRUE(std::isnan(model.focal));
+    } else {
+      EXPECT_EQ(model.focal, focal);
+    }
   }
 }
 

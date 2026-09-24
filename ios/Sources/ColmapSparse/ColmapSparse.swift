@@ -365,7 +365,7 @@ public struct SparseReconstructor: Sendable {
     guard
       let url = Bundle.module.url(
         forResource: "sift", withExtension: "metallib",
-        subdirectory: "Resources/\(platform)")
+        subdirectory: platform)
     else {
       throw SparseError.resource(
         "The package's \(platform) SIFT metallib is missing. Rebuild with scripts/build-ios.sh all."

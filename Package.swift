@@ -14,7 +14,11 @@ let package = Package(
       exclude: ["CMakeLists.txt", "README.md", "include", "src", "tests"],
       sources: ["Sources/ColmapSparse/ColmapSparse.swift"],
       resources: [
-        .copy("Sources/ColmapSparse/Resources"),
+        // Copy each platform directory separately. A top-level Resources
+        // folder makes codesign reject the iOS resource bundle.
+        .copy("Sources/ColmapSparse/Resources/iphoneos"),
+        .copy("Sources/ColmapSparse/Resources/iphonesimulator"),
+        .copy("Sources/ColmapSparse/Resources/macosx"),
         .copy("Licenses"),
         .copy("THIRD_PARTY_NOTICES.md"),
       ],

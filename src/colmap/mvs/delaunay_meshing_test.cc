@@ -29,12 +29,14 @@
 
 #include "colmap/mvs/delaunay_meshing.h"
 
+#include "colmap/geometry/sim3.h"
 #include "colmap/scene/synthetic.h"
 #include "colmap/util/endian.h"
 #include "colmap/util/file.h"
 #include "colmap/util/ply.h"
 #include "colmap/util/testing.h"
 
+#include <cmath>
 #include <fstream>
 
 #include <gtest/gtest.h>
@@ -93,6 +95,64 @@ TEST(SparseDelaunayMeshing, NonSubsampled) {
   EXPECT_TRUE(ExistsFile(output_path));
   const std::vector<PlyPoint> mesh_vertices = ReadPly(output_path);
   EXPECT_GE(mesh_vertices.size(), 3);
+}
+
+TEST(SparseDelaunayMeshing, PointAtCameraCenter) {
+  const auto test_dir = CreateTestDir();
+  const auto sparse_path = test_dir / "sparse";
+  const auto output_path = test_dir / "mesh.ply";
+  Reconstruction reconstruction =
+      CreateAndWriteSyntheticReconstruction(sparse_path);
+
+  // Move one point onto the projection center of an image that observes it.
+  // Its viewing ray from that image then has zero length, which used to make
+  // the ray caster walk the triangulation forever.
+  const point3D_t point3D_id = *reconstruction.Point3DIds().begin();
+  Point3D& point3D = reconstruction.Point3D(point3D_id);
+  const image_t image_id = point3D.track.Element(0).image_id;
+  point3D.xyz = reconstruction.Image(image_id).ProjectionCenter();
+  reconstruction.Write(sparse_path);
+
+  DelaunayMeshingOptions options;
+  options.num_threads = 1;
+  SparseDelaunayMeshing(options, sparse_path, output_path);
+
+  EXPECT_TRUE(ExistsFile(output_path));
+  const std::vector<PlyPoint> mesh_vertices = ReadPly(output_path);
+  EXPECT_GE(mesh_vertices.size(), 3);
+}
+
+TEST(SparseDelaunayMeshing, PointNearCameraCenterAtLargeCoordinates) {
+  const auto test_dir = CreateTestDir();
+  const auto sparse_path = test_dir / "sparse";
+  const auto output_path = test_dir / "mesh.ply";
+  Reconstruction reconstruction =
+      CreateAndWriteSyntheticReconstruction(sparse_path);
+  reconstruction.Transform(Sim3d(
+      1.0, Eigen::Quaterniond::Identity(), Eigen::Vector3d(1e5, -1e5, 1e5)));
+
+  const point3D_t point3D_id = *reconstruction.Point3DIds().begin();
+  Point3D& point3D = reconstruction.Point3D(point3D_id);
+  const image_t image_id = point3D.track.Element(0).image_id;
+  const Eigen::Vector3d camera_center =
+      reconstruction.Image(image_id).ProjectionCenter();
+  // Keep a nonzero direction that is shorter than the ray endpoint offset,
+  // including after rounding at large scene coordinates.
+  point3D.xyz = camera_center + Eigen::Vector3d(1e-8, 0, 0);
+  ASSERT_GT((point3D.xyz - camera_center).squaredNorm(), 0.0);
+  reconstruction.Write(sparse_path);
+
+  DelaunayMeshingOptions options;
+  options.num_threads = 1;
+  SparseDelaunayMeshing(options, sparse_path, output_path);
+
+  const std::vector<PlyPoint> mesh_vertices = ReadPly(output_path);
+  ASSERT_GE(mesh_vertices.size(), 3);
+  for (const PlyPoint& vertex : mesh_vertices) {
+    EXPECT_TRUE(std::isfinite(vertex.x));
+    EXPECT_TRUE(std::isfinite(vertex.y));
+    EXPECT_TRUE(std::isfinite(vertex.z));
+  }
 }
 
 TEST(DenseDelaunayMeshing, Integration) {

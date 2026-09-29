@@ -16,8 +16,10 @@
 namespace colmap {
 namespace {
 
-bool RunBundleAdjustment(const BundleAdjustmentOptions& options,
-                         Reconstruction& reconstruction) {
+bool RunBundleAdjustment(
+    const BundleAdjustmentOptions& options,
+    Reconstruction& reconstruction,
+    int max_track_length = std::numeric_limits<int>::max()) {
   if (reconstruction.NumImages() == 0) {
     LOG(ERROR) << "Cannot run bundle adjustment: no registered images";
     return false;
@@ -35,9 +37,45 @@ bool RunBundleAdjustment(const BundleAdjustmentOptions& options,
   }
   ba_config.FixGauge(BundleAdjustmentGauge::TWO_CAMS_FROM_WORLD);
 
+  if (max_track_length < std::numeric_limits<int>::max()) {
+    size_t num_points_to_refine = 0;
+    for (const auto& [point3D_id, point3D] : reconstruction.Points3D()) {
+      if (point3D.track.Length() > static_cast<size_t>(max_track_length)) {
+        ba_config.IgnorePoint(point3D_id);
+      } else {
+        ++num_points_to_refine;
+      }
+    }
+    if (num_points_to_refine == 0) {
+      return true;
+    }
+  }
+
   auto ba = CreateDefaultBundleAdjuster(options, ba_config, reconstruction);
 
   return ba->Solve()->IsSolutionUsable();
+}
+
+BundleAdjustmentOptions RefinementBundleAdjustmentOptions(
+    const BundleAdjustmentOptions& ba_options) {
+  BundleAdjustmentOptions custom_ba_options = ba_options;
+  custom_ba_options.refine_focal_length = false;
+  custom_ba_options.refine_principal_point = false;
+  custom_ba_options.refine_extra_params = false;
+  custom_ba_options.refine_sensor_from_rig = false;
+  custom_ba_options.refine_rig_from_world = false;
+  custom_ba_options.print_summary = false;
+  custom_ba_options.min_track_length = 0;
+  if (custom_ba_options.ceres) {
+    custom_ba_options.ceres->loss_function_type =
+        CeresBundleAdjustmentOptions::LossFunctionType::TRIVIAL;
+    custom_ba_options.ceres->solver_options.function_tolerance = 0.0;
+    custom_ba_options.ceres->solver_options.gradient_tolerance = 1.0;
+    custom_ba_options.ceres->solver_options.parameter_tolerance = 0.0;
+    custom_ba_options.ceres->solver_options.max_num_iterations = 50;
+    custom_ba_options.ceres->solver_options.max_linear_solver_iterations = 100;
+  }
+  return custom_ba_options;
 }
 
 }  // namespace
@@ -224,8 +262,12 @@ void GlobalMapper::EstablishTracks(const GlobalMapperOptions& options) {
     if (!is_consistent) continue;
 
     const size_t num_images = image_id_set.size();
-    if (num_images < static_cast<size_t>(options.track_min_num_views_per_track))
+    if (num_images <
+            static_cast<size_t>(options.track_min_num_views_per_track) ||
+        num_images >
+            static_cast<size_t>(options.track_max_num_views_per_track)) {
       continue;
+    }
 
     const point3D_t point3D_id = next_point3D_id++;
     track_lengths.emplace_back(point3D.track.Length(), point3D_id);
@@ -444,25 +486,16 @@ bool GlobalMapper::IterativeRetriangulateAndRefine(
     mapper.TriangulateImage(options, image_id);
   }
 
-  // Set up bundle adjustment options for colmap's incremental mapper.
-  BundleAdjustmentOptions custom_ba_options = ba_options;
-  custom_ba_options.print_summary = false;
-  if (custom_ba_options.ceres && ba_options.ceres) {
-    custom_ba_options.ceres->solver_options.num_threads =
-        ba_options.ceres->solver_options.num_threads;
-    custom_ba_options.ceres->solver_options.max_num_iterations = 50;
-    custom_ba_options.ceres->solver_options.max_linear_solver_iterations = 100;
-  }
-
   // Iterative global refinement.
   IncrementalMapper::Options mapper_options;
   mapper_options.random_seed = options.random_seed;
-  mapper.IterativeGlobalRefinement(/*max_num_refinements=*/5,
-                                   /*max_refinement_change=*/0.0005,
-                                   mapper_options,
-                                   custom_ba_options,
-                                   options,
-                                   /*normalize_reconstruction=*/true);
+  mapper.IterativeGlobalRefinement(
+      /*max_num_refinements=*/5,
+      /*max_refinement_change=*/0.0005,
+      mapper_options,
+      RefinementBundleAdjustmentOptions(ba_options),
+      options,
+      /*normalize_reconstruction=*/false);
 
   mapper.EndReconstruction(/*discard=*/false);
 
@@ -474,6 +507,25 @@ bool GlobalMapper::IterativeRetriangulateAndRefine(
       ReprojectionErrorType::NORMALIZED);
 
   if (!RunBundleAdjustment(ba_options, *reconstruction_)) {
+    return false;
+  }
+
+  obs_manager.FilterPoints3DWithLargeReprojectionError(
+      max_normalized_reproj_error,
+      reconstruction_->Point3DIds(),
+      ReprojectionErrorType::NORMALIZED);
+
+  if (!RunBundleAdjustment(ba_options, *reconstruction_)) {
+    return false;
+  }
+
+  // Joint adjustment can move cameras without updating short tracks excluded
+  // by min_track_length. Refit only those points against the final cameras,
+  // preserving the robustly fitted longer tracks.
+  if (ba_options.refine_points3D && ba_options.min_track_length > 2 &&
+      !RunBundleAdjustment(RefinementBundleAdjustmentOptions(ba_options),
+                           *reconstruction_,
+                           ba_options.min_track_length - 1)) {
     return false;
   }
 

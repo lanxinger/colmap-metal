@@ -37,6 +37,7 @@
 #include "colmap/util/hash_containers.h"
 #include "colmap/util/testing.h"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -154,6 +155,42 @@ TEST(GravityRefinement, RefineGravityWithNonTrivialRigs) {
                      gt_reconstruction,
                      pose_priors,
                      /*max_gravity_error_deg=*/1e-2);
+}
+
+TEST(GravityRefinement, RejectInconsistentNeighborVotes) {
+  SetPRNGSeed(1);
+  Reconstruction reconstruction;
+  SyntheticDatasetOptions dataset_options;
+  dataset_options.num_rigs = 1;
+  dataset_options.num_cameras_per_rig = 1;
+  dataset_options.num_frames_per_rig = 9;
+  SynthesizeDataset(dataset_options, &reconstruction);
+
+  auto image_ids = reconstruction.RegImageIds();
+  std::sort(image_ids.begin(), image_ids.end());
+  ASSERT_EQ(image_ids.size(), 9);
+  const image_t center_id = image_ids.front();
+  const Eigen::Vector3d original_gravity = Eigen::Vector3d::UnitZ();
+  std::vector<PosePrior> pose_priors;
+  PoseGraph pose_graph;
+  for (size_t i = 0; i < image_ids.size(); ++i) {
+    PosePrior prior;
+    prior.corr_data_id = reconstruction.Image(image_ids[i]).DataId();
+    prior.gravity = i == 0 ? original_gravity
+                          : (i <= 4 ? Eigen::Vector3d::UnitY().eval()
+                                    : Eigen::Vector3d::UnitX().eval());
+    pose_priors.push_back(prior);
+    if (i != 0) {
+      // Identity relative rotations make the two equal-sized voting groups
+      // orthogonal in the center camera. Neither has a strict majority.
+      pose_graph.AddEdge(center_id, image_ids[i], PoseGraph::Edge(Rigid3d()));
+    }
+  }
+
+  GravityRefinerOptions options;
+  options.solver_options.num_threads = 1;
+  RunGravityRefinement(options, pose_graph, reconstruction, pose_priors);
+  EXPECT_TRUE(pose_priors.front().gravity.isApprox(original_gravity));
 }
 
 }  // namespace

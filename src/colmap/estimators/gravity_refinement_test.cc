@@ -38,6 +38,7 @@
 #include "colmap/util/testing.h"
 
 #include <algorithm>
+
 #include <gtest/gtest.h>
 
 namespace colmap {
@@ -177,8 +178,8 @@ TEST(GravityRefinement, RejectInconsistentNeighborVotes) {
     PosePrior prior;
     prior.corr_data_id = reconstruction.Image(image_ids[i]).DataId();
     prior.gravity = i == 0 ? original_gravity
-                          : (i <= 4 ? Eigen::Vector3d::UnitY().eval()
-                                    : Eigen::Vector3d::UnitX().eval());
+                           : (i <= 4 ? Eigen::Vector3d::UnitY().eval()
+                                     : Eigen::Vector3d::UnitX().eval());
     pose_priors.push_back(prior);
     if (i != 0) {
       // Identity relative rotations make the two equal-sized voting groups

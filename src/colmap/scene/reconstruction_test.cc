@@ -941,6 +941,30 @@ TEST(Reconstruction, Crop) {
   EXPECT_FALSE(cropped2.Image(3).HasPose());
 }
 
+TEST(Reconstruction, CropPreservesPointErrors) {
+  Reconstruction reconstruction;
+  GenerateReconstruction(2, &reconstruction);
+
+  Track known_track;
+  known_track.AddElement(1, 0);
+  const point3D_t known_point3D_id =
+      reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, 1), known_track);
+  reconstruction.Point3D(known_point3D_id).error = 2.5;
+
+  Track unknown_track;
+  unknown_track.AddElement(2, 0);
+  reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, 1), unknown_track);
+
+  const Reconstruction cropped = reconstruction.Crop(Eigen::AlignedBox3d(
+      Eigen::Vector3d(-1, -1, -1), Eigen::Vector3d(1, 1, 1)));
+  ASSERT_EQ(cropped.NumPoints3D(), 2);
+  EXPECT_DOUBLE_EQ(
+      cropped.Point3D(cropped.Image(1).Point2D(0).point3D_id).error, 2.5);
+  EXPECT_DOUBLE_EQ(
+      cropped.Point3D(cropped.Image(2).Point2D(0).point3D_id).error, -1.0);
+  EXPECT_DOUBLE_EQ(cropped.ComputeMeanReprojectionError(), 2.5);
+}
+
 TEST(Reconstruction, Transform) {
   Reconstruction reconstruction;
   GenerateReconstruction(3, &reconstruction);
@@ -1069,7 +1093,25 @@ TEST(Reconstruction, DeleteAllPoints2DAndPoints3D) {
   SynthesizeDataset(synthetic_dataset_options, &reconstruction);
   reconstruction.DeleteAllPoints2DAndPoints3D();
   EXPECT_EQ(reconstruction.NumPoints3D(), 0);
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 0);
+  for (const auto& [_, image] : reconstruction.Images()) {
+    EXPECT_EQ(image.NumPoints2D(), 0);
+    EXPECT_EQ(image.NumPoints3D(), 0);
+  }
+  EXPECT_TRUE(reconstruction.IsValid());
   ExpectValidPtrs(reconstruction);
+
+  const auto reg_image_ids = reconstruction.RegImageIds();
+  Track track;
+  for (size_t i = 0; i < 2; ++i) {
+    reconstruction.Image(reg_image_ids[i])
+        .SetPoints2D(std::vector<Eigen::Vector2d>(1, Eigen::Vector2d::Zero()));
+    track.AddElement(reg_image_ids[i], 0);
+  }
+  reconstruction.AddPoint3D(Eigen::Vector3d(0, 0, 1), track);
+  EXPECT_EQ(reconstruction.NumPoints3D(), 1);
+  EXPECT_EQ(reconstruction.ComputeNumObservations(), 2);
+  EXPECT_TRUE(reconstruction.IsValid());
 }
 
 TEST(Reconstruction, TranscribeImageIdsToDatabase) {
@@ -1391,6 +1433,71 @@ TEST(Reconstruction, ReadWriteBinaryRoundtrip) {
   EXPECT_THAT(loaded, ReconstructionEq(reconstruction));
   ExpectValidPtrs(loaded);
 }
+
+class ReconstructionReadTest : public testing::TestWithParam<bool> {};
+
+TEST_P(ReconstructionReadTest, ReplacesExistingModel) {
+  const bool binary = GetParam();
+  const auto test_dir = CreateTestDir();
+  auto write = [&](const Reconstruction& reconstruction) {
+    if (binary) {
+      reconstruction.WriteBinary(test_dir);
+    } else {
+      reconstruction.WriteText(test_dir);
+    }
+  };
+  auto read = [&](Reconstruction& reconstruction) {
+    if (binary) {
+      reconstruction.ReadBinary(test_dir);
+    } else {
+      reconstruction.ReadText(test_dir);
+    }
+  };
+
+  Reconstruction loaded;
+  GenerateReconstruction(3, &loaded);
+  loaded.AddPoint3D(100, Point3D());
+
+  Reconstruction replacement;
+  SyntheticDatasetOptions options;
+  options.num_rigs = 1;
+  options.num_cameras_per_rig = 2;
+  options.num_frames_per_rig = 2;
+  options.num_points3D = 5;
+  SynthesizeDataset(options, &replacement);
+  replacement.AddPoint3D(7, Point3D());
+  write(replacement);
+  read(loaded);
+
+  EXPECT_THAT(loaded, ReconstructionEq(replacement));
+  EXPECT_EQ(loaded.NumRegFrames(), replacement.NumRegFrames());
+  EXPECT_EQ(loaded.NumRegImages(), replacement.NumRegImages());
+  EXPECT_THAT(loaded.RegFrameIds(),
+              testing::UnorderedElementsAreArray(replacement.RegFrameIds()));
+  EXPECT_TRUE(loaded.IsValid());
+  EXPECT_EQ(loaded.AddPoint3D(Eigen::Vector3d::Zero(), Track()), 8);
+  EXPECT_THAT(loaded.RegImageIds(),
+              testing::UnorderedElementsAreArray(replacement.RegImageIds()));
+
+  // Re-reading the same model must discard newly added data as well.
+  read(loaded);
+  EXPECT_THAT(loaded, ReconstructionEq(replacement));
+  ExpectValidPtrs(loaded);
+  EXPECT_TRUE(loaded.IsValid());
+  EXPECT_EQ(loaded.AddPoint3D(Eigen::Vector3d::Zero(), Track()), 8);
+
+  // An empty model must also replace all state from the previous read.
+  write(Reconstruction());
+  read(loaded);
+  EXPECT_EQ(loaded.NumRegFrames(), 0);
+  EXPECT_EQ(loaded.NumRegImages(), 0);
+  EXPECT_TRUE(loaded.IsValid());
+  EXPECT_EQ(loaded.AddPoint3D(Eigen::Vector3d::Zero(), Track()), 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(TextAndBinary,
+                         ReconstructionReadTest,
+                         testing::Bool());
 
 TEST(Reconstruction, ReadAutoDetectFormat) {
   SetPRNGSeed(0);

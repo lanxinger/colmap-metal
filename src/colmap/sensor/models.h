@@ -35,6 +35,7 @@
 
 #include <array>
 #include <cfloat>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -771,12 +772,19 @@ struct EquirectangularCameraModel
                                      true)
 
   template <typename T>
-  static inline bool HasBogusParams(const std::vector<T>& /*params*/,
+  static inline bool HasBogusParams(const std::vector<T>& params,
                                     size_t /*width*/,
                                     size_t /*height*/,
                                     T /*min_focal_length_ratio*/,
                                     T /*max_focal_length_ratio*/,
                                     T /*max_extra_param*/) {
+    // Use ADL for ceres::Jet, whose finite check inspects the scalar value.
+    using std::isfinite;
+    for (const size_t idx : metadata_idxs) {
+      if (!isfinite(params[idx])) {
+        return true;
+      }
+    }
     return false;
   }
 
@@ -874,14 +882,16 @@ inline void CameraModelRescale(CameraModelId model_id,
                                std::vector<double>& params);
 
 // Check whether parameters are valid, i.e. the parameter vector has
-// the correct dimensions that match the specified camera model.
+// the correct dimensions that match the specified camera model and contains
+// only finite values.
 //
 // @param model_id      Unique identifier of camera model.
 // @param params        Array of camera parameters.
 bool CameraModelVerifyParams(CameraModelId model_id,
                              const std::vector<double>& params);
 
-// Check whether camera has bogus parameters.
+// Check whether camera has bogus parameters. Non-finite parameters are always
+// considered bogus.
 //
 // @param model_id                Unique identifier of camera model.
 // @param params                  Array of camera parameters.
@@ -1076,8 +1086,9 @@ bool BasePerspectiveCameraModel<CameraModel>::HasBogusFocalLength(
   const T inv_max_size = 1.0 / std::max(width, height);
   for (const size_t idx : CameraModel::focal_length_idxs) {
     const T focal_length_ratio = params[idx] * inv_max_size;
-    if (focal_length_ratio < min_focal_length_ratio ||
-        focal_length_ratio > max_focal_length_ratio) {
+    // Negated range check, so that NaN ratios read as bogus.
+    if (!(focal_length_ratio >= min_focal_length_ratio &&
+          focal_length_ratio <= max_focal_length_ratio)) {
       return true;
     }
   }
@@ -1091,7 +1102,8 @@ bool BasePerspectiveCameraModel<CameraModel>::HasBogusPrincipalPoint(
     const std::vector<T>& params, const size_t width, const size_t height) {
   const T cx = params[CameraModel::principal_point_idxs[0]];
   const T cy = params[CameraModel::principal_point_idxs[1]];
-  return cx < 0 || cx > width || cy < 0 || cy > height;
+  // Negated range check, so that NaN coordinates read as bogus.
+  return !(cx >= 0 && cx <= width && cy >= 0 && cy <= height);
 }
 
 template <typename CameraModel>
@@ -1099,7 +1111,8 @@ template <typename T>
 bool BasePerspectiveCameraModel<CameraModel>::HasBogusExtraParams(
     const std::vector<T>& params, const T max_extra_param) {
   for (const size_t idx : CameraModel::extra_params_idxs) {
-    if (std::abs(params[idx]) > max_extra_param) {
+    // Negated bound check, so that NaN parameters read as bogus.
+    if (!(std::abs(params[idx]) <= max_extra_param)) {
       return true;
     }
   }
@@ -1808,7 +1821,7 @@ void FOVCameraModel::Distortion(
     // factor(radius) = atan(radius * 2 * tan(omega / 2)) / ...
     //                  (radius * omega);
     // simplify(taylor(factor, omega, 'order', 3))
-    factor = (omega2 * radius2) / T(3) - omega2 / T(12) + T(1);
+    factor = omega2 / T(12) - (omega2 * radius2) / T(3) + T(1);
   } else if (radius2 < kEpsilon) {
     // Derivation of this case with Matlab:
     // syms radius omega;
@@ -2646,7 +2659,8 @@ bool EUCMCameraModel::HasBogusExtraParams(const std::vector<T>& params,
 
   const T alpha = params[4];
   const T beta = params[5];
-  return alpha < T(0) || alpha > T(1) || beta <= T(0);
+  // Negated range check, so that NaN values read as bogus.
+  return !(alpha >= T(0) && alpha <= T(1) && beta > T(0));
 }
 
 std::vector<double> EUCMCameraModel::InitializeParams(const double focal_length,

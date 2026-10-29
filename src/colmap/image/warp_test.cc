@@ -126,6 +126,45 @@ TEST(Warp, IdenticalCameras) {
   CheckBitmapsEqual(source_image_rgb, target_image_rgb);
 }
 
+TEST(Warp, HomographyDownsamplingCoordinates) {
+  const Camera source_camera =
+      Camera::CreateFromModelId(1, CameraModelId::kPinhole, 100, 100, 80);
+  Bitmap source_image(100, 80, false);
+  for (int y = 0; y < source_image.Height(); ++y) {
+    for (int x = 0; x < source_image.Width(); ++x) {
+      source_image.SetPixel(x, y, BitmapColor<uint8_t>(x + y));
+    }
+  }
+  for (const size_t height : {20, 32}) {
+    Camera target_camera = source_camera;
+    target_camera.Rescale(40, height);
+    for (const double perspective : {0.0, 0.001}) {
+      Eigen::Matrix3d H;
+      H << 1, 0.1, 2.5, -0.1, 1, 1.25, perspective, 0, 1;
+      Bitmap actual;
+      WarpImageWithHomographyBetweenCameras(
+          H, source_camera, target_camera, source_image, &actual);
+
+      // Independently evaluate the target pixel's projection on the input
+      // intensity ramp. Restrict the comparison to the interior so the
+      // downsampling filter cannot encounter an out-of-bounds source pixel.
+      for (int y = 4; y < actual.Height() - 4; ++y) {
+        for (int x = 4; x < actual.Width() - 8; ++x) {
+          const Eigen::Vector3d warped =
+              H * Eigen::Vector3d(x + 0.5, y + 0.5, 1);
+          const auto ray = target_camera.CamFromImg(warped.hnormalized());
+          ASSERT_TRUE(ray.has_value());
+          const auto source = source_camera.ImgFromCam(ray->homogeneous());
+          ASSERT_TRUE(source.has_value());
+          const auto pixel = actual.GetPixel(x, y);
+          ASSERT_TRUE(pixel.has_value());
+          EXPECT_NEAR(pixel->r, source->x() + source->y() - 1, 2);
+        }
+      }
+    }
+  }
+}
+
 TEST(Warp, ShiftedCameras) {
   const Camera source_camera =
       Camera::CreateFromModelId(1, CameraModelId::kPinhole, 1, 100, 100);

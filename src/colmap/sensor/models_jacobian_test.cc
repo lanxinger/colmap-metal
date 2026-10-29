@@ -156,6 +156,10 @@ template <typename CameraModel>
 void TestModelImgFromCamWithJac(const std::vector<double>& params) {
   static_assert(CameraModel::has_img_from_cam_with_jac,
                 "Model does not provide an analytic ImgFromCamWithJac");
+  for (const double w : {0.5, 1.0, 2.0}) {
+    TestImgFromCamWithJac<CameraModel>(params, 0.0, 0.0, w);
+    TestCamRayJacobian<CameraModel>(params, 0.0, 0.0, w);
+  }
   // NOLINTNEXTLINE(clang-analyzer-security.FloatLoopCounter)
   for (double u = -0.5; u <= 0.5; u += 0.1) {
     // NOLINTNEXTLINE(clang-analyzer-security.FloatLoopCounter)

@@ -164,11 +164,12 @@ void WarpImageWithHomographyBetweenCameras(const Eigen::Matrix3d& H,
 
   // To avoid aliasing, perform the warping in the source resolution and
   // then rescale the image at the end.
-  Camera scaled_target_camera = target_camera;
-  if (target_camera.width != source_camera.width ||
-      target_camera.height != source_camera.height) {
-    scaled_target_camera.Rescale(source_camera.width, source_camera.height);
-  }
+  const Eigen::Vector3d target_from_intermediate_scale(
+      static_cast<double>(target_camera.width) / source_camera.width,
+      static_cast<double>(target_camera.height) / source_camera.height,
+      1.0);
+  const Eigen::Matrix3d warp_H =
+      H * target_from_intermediate_scale.asDiagonal();
 
   Eigen::Vector3d image_point(0, 0, 1);
   for (int y = 0; y < target_image->Height(); ++y) {
@@ -177,7 +178,7 @@ void WarpImageWithHomographyBetweenCameras(const Eigen::Matrix3d& H,
       image_point.x() = x + 0.5;
 
       // Camera models assume that the upper left pixel center is (0.5, 0.5).
-      const Eigen::Vector3d warped_point = H * image_point;
+      const Eigen::Vector3d warped_point = warp_H * image_point;
       if (warped_point.z() == 0) {
         continue;
       }

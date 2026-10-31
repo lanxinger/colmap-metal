@@ -7,6 +7,8 @@ on:
       - release/*
   pull_request:
     types: [assigned, opened, synchronize, reopened]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:

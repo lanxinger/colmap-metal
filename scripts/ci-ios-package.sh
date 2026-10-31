@@ -9,6 +9,8 @@ ci_root="${COLMAP_IOS_CI_ROOT:-${RUNNER_TEMP:-$repo_dir/build-ios}/colmap-ios-ci
 export COLMAP_IOS_BUILD_ROOT="$ci_root/native"
 export COLMAP_IOS_DOWNLOAD_CACHE="${COLMAP_IOS_DOWNLOAD_CACHE:-$ci_root/downloads}"
 export COLMAP_IOS_BUILD_JOBS="${COLMAP_IOS_BUILD_JOBS:-2}"
+# Test the freshly built slices, not the published SwiftPM binary.
+export COLMAP_SPARSE_LOCAL_BUILD=1
 log_dir="$ci_root/logs"
 mkdir -p "$log_dir" "$COLMAP_IOS_DOWNLOAD_CACHE"
 cd "$repo_dir"

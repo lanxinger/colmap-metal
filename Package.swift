@@ -1,12 +1,22 @@
 // swift-tools-version: 6.0
 import PackageDescription
+import Foundation
+
+// Native development and CI can opt in to the locally rebuilt XCFramework.
+let nativeTarget: Target = ProcessInfo.processInfo.environment["COLMAP_SPARSE_LOCAL_BUILD"] == "1"
+  ? .binaryTarget(name: "ColmapSparseNative", path: "Artifacts/ColmapSparse.xcframework")
+  : .binaryTarget(
+      name: "ColmapSparseNative",
+      url: "https://github.com/lanxinger/colmap-metal/releases/download/0.1.0/ColmapSparseNative-0.1.0.xcframework.zip",
+      checksum: "f92d6bba61269759da67f9f897803ab061905d74a104cd98fc575d719014ba9b"
+    )
 
 let package = Package(
   name: "ColmapSparse",
   platforms: [.iOS(.v18), .macOS(.v13)],
   products: [.library(name: "ColmapSparse", targets: ["ColmapSparse"])],
   targets: [
-    .binaryTarget(name: "ColmapSparseNative", path: "Artifacts/ColmapSparse.xcframework"),
+    nativeTarget,
     .target(
       name: "ColmapSparse",
       dependencies: ["ColmapSparseNative"],

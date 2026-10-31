@@ -11,7 +11,7 @@ The software is licensed under the new BSD license.
 
 This is the maintained [COLMAP-Metal fork](https://github.com/lanxinger/colmap-metal)
 of [upstream COLMAP](https://github.com/colmap/colmap). It adds Metal acceleration
-for Apple platforms and a local Swift package for sparse reconstruction on iPhone
+for Apple platforms and a Swift package for sparse reconstruction on iPhone
 and Mac. The desktop CLI, optional Qt GUI and Python bindings retain COLMAP's
 reconstruction workflows and file formats.
 
@@ -155,13 +155,14 @@ Boost **1.92.0** headers available, build from the repository root:
 
 ```bash
 bash scripts/build-ios.sh all
-swift test --jobs 2
+COLMAP_SPARSE_LOCAL_BUILD=1 swift test --jobs 2
 ```
 
-Add the repository as a **local Swift package after building**. The script builds
-pinned native dependencies and generates `Artifacts/ColmapSparse.xcframework`
-and platform-specific Metal resources; generated artifacts are not committed.
-This package uses a separate sparse-only build from the desktop CLI.
+Add this repository as a Swift package using the `0.1.0` release. SwiftPM
+downloads the versioned XCFramework release asset and verifies its checksum;
+the package includes the platform-specific Metal resources. For native development,
+the build script generates `Artifacts/ColmapSparse.xcframework` and refreshes the
+shader resources. Set `COLMAP_SPARSE_LOCAL_BUILD=1` when testing a new native build. This package uses a separate sparse-only build from the desktop CLI.
 
 Supply images in capture order with explicit camera calibration. The package
 runs Metal SIFT extraction and matching followed by incremental mapping, then

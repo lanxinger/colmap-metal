@@ -24,7 +24,6 @@ benchmark/reconstruction/runs/
 doc/_build
 vcpkg_installed/
 Artifacts/
-ios/Sources/ColmapSparse/Resources/*/sift.metallib
 
 # Compiled Object files
 *.slo

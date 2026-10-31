@@ -20,10 +20,12 @@ The script verifies downloaded Eigen, glog, Ceres and PoseLib source archives,
 builds static dependencies for each SDK, compiles that SDK's Metal shaders and
 creates `build-ios/ColmapSparse.xcframework`. The package preparation step copies
 the result to `Artifacts/ColmapSparse.xcframework` and installs the three
-platform-specific shader resources for SwiftPM. Generated binaries and resources
-are not committed. Add this repository as a local Swift package after building.
+platform-specific shader resources for SwiftPM. The generated XCFramework is not
+committed; the package includes the shader resources and downloads the published
+XCFramework by default. Set `COLMAP_SPARSE_LOCAL_BUILD=1` to use the locally
+built XCFramework when testing changes to native code.
 
-Run `swift test --jobs 2` to check the Swift calibration, shader resources,
+Run `COLMAP_SPARSE_LOCAL_BUILD=1 swift test --jobs 2` to check the Swift calibration, shader resources,
 output protection and cancellation behavior on Mac. The public import is
 `ColmapSparse`; the binary module is `ColmapSparseNative`.
 

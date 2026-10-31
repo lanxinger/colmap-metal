@@ -51,7 +51,9 @@ their `Licenses/` files with any distributed package.
 ## Continuous integration
 
 The `COLMAP (iOS package)` workflow builds the package on an arm64 Mac with Xcode 26.3
-for pull requests, pushes to `main` or release branches, and manual runs. It
+for pull requests, pushes to `main` or release branches, published releases, and
+manual runs. Docker and PyCOLMAP workflows run only when manually dispatched and
+require an explicit publish choice to upload artifacts. The iOS workflow
 downloads checksum-verified Boost 1.92.0 headers and uses the pinned dependency
 builds above; cached downloads are verified again before use.
 

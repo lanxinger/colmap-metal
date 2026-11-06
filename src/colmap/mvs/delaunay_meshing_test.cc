@@ -45,6 +45,8 @@ namespace colmap {
 namespace mvs {
 namespace {
 
+#if defined(COLMAP_CGAL_ENABLED)
+
 Reconstruction CreateAndWriteSyntheticReconstruction(
     const std::filesystem::path& sparse_path,
     int num_frames = 5,
@@ -60,8 +62,6 @@ Reconstruction CreateAndWriteSyntheticReconstruction(
   reconstruction.Write(sparse_path);
   return reconstruction;
 }
-
-#if defined(COLMAP_CGAL_ENABLED)
 
 TEST(SparseDelaunayMeshing, Integration) {
   const auto test_dir = CreateTestDir();

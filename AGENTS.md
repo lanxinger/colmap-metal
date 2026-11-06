@@ -77,7 +77,7 @@ COLMAP is a general-purpose Structure-from-Motion (SfM) and Multi-View Stereo (M
 | GlobalMapper | sfm/global_mapper.h | Global SfM (rotation averaging + global positioning) |
 | IncrementalTriangulator | sfm/incremental_triangulator.h | Point creation, track merging/completion |
 | ObservationManager | sfm/observation_manager.h | Per-image visibility stats, filtering |
-| PatchMatch | mvs/patch_match.h | CPU wrapper for CUDA PatchMatch stereo |
+| PatchMatch | mvs/patch_match.h | CPU wrapper for CUDA / Metal PatchMatch stereo |
 | PatchMatchController | mvs/patch_match.h | Orchestrates multi-GPU depth estimation |
 | StereoFusion | mvs/fusion.h | Fuses depth maps into 3D point cloud |
 | AutomaticReconstructionController | controllers/automatic_reconstruction.h | End-to-end pipeline (extract, match, SfM, MVS) |
@@ -90,7 +90,7 @@ CLI entry point: exe/colmap.cc (subcommand dispatcher).
 
 ## Maintained Metal backend
 
-`METAL_ENABLED` is declared in `CMakeLists.txt` and enabled on Apple platforms through `cmake/FindDependencies.cmake`. When changing GPU feature extraction or image warping, inspect the relevant Metal implementation alongside the other affected backends. `scripts/benchmark_sift_metal.py` is the SIFT benchmark entry point; `benchmark/benchmark_sift_metal_test.py` checks its reporting/selection behavior. A benchmark-script unit test does not establish GPU correctness or performance: use a matched dataset and target Mac for those claims.
+`METAL_ENABLED` is declared in `CMakeLists.txt` and enabled on Apple platforms through `cmake/FindDependencies.cmake`. Metal SIFT and image warping remain available with MVS disabled. `METAL_MVS_ENABLED` selects Metal dense stereo on macOS when MVS is enabled and CUDA is disabled; `COLMAP_PATCH_MATCH_ENABLED` gates callers for either dense backend. When changing GPU feature extraction, image warping or dense stereo, inspect the relevant Metal implementation alongside the other affected backends. `mvs/patch_match_metal_test` checks dense stereo on a Metal device. `scripts/benchmark_sift_metal.py` is the SIFT benchmark entry point; `benchmark/benchmark_sift_metal_test.py` checks its reporting/selection behavior. A benchmark-script unit test does not establish GPU correctness or performance: use a matched dataset and target Mac for those claims.
 
 ## Build Instructions
 
@@ -210,7 +210,7 @@ scripts/format/python.sh
 | Library | Role | Gate |
 |---------|------|------|
 | CUDA | GPU PatchMatch, SiftGPU, Ceres GPU BA | CUDA_ENABLED |
-| Metal | macOS GPU feature extraction and image warping | METAL_ENABLED (Apple platforms) |
+| Metal | macOS GPU features, image warping and dense stereo | METAL_ENABLED (dense also requires MVS_ENABLED) |
 | ONNX Runtime | ALIKED, LightGlue neural features | ONNX_ENABLED |
 | Qt5/6 | GUI | GUI_ENABLED |
 | OpenGL/GLEW | 3D visualization, SiftGPU | OPENGL_ENABLED |

@@ -278,6 +278,12 @@ link your Qt 5 installation while configuring CMake::
     brew unlink qt && brew link --force qt
     cmake ...
 
+With ``METAL_ENABLED=ON`` and ``MVS_ENABLED=ON``, macOS builds also support dense
+reconstruction through Metal when CUDA is disabled. PatchMatch compiles its
+embedded shaders at runtime; Metal SIFT and image warping still require the
+Xcode Metal compiler. ``MVS_ENABLED=OFF`` keeps Metal SIFT and image warping
+enabled while omitting dense reconstruction.
+
 Run COLMAP::
 
     colmap -h

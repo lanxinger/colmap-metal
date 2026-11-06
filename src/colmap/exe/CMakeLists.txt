@@ -41,6 +41,9 @@ if(CUDA_ENABLED)
         list(APPEND OPTIONAL_LIBS colmap_mvs_cuda)
     endif()
 endif()
+if(METAL_MVS_ENABLED)
+    list(APPEND OPTIONAL_LIBS colmap_mvs_metal)
+endif()
 if(GUI_ENABLED)
     list(APPEND OPTIONAL_LIBS
         colmap_ui
@@ -77,6 +80,11 @@ COLMAP_ADD_LIBRARY(
         Boost::boost
         colmap_sfm
 )
+if(CUDA_ENABLED AND MVS_ENABLED)
+    target_link_libraries(colmap_exe PRIVATE colmap_mvs_cuda)
+elseif(METAL_MVS_ENABLED)
+    target_link_libraries(colmap_exe PRIVATE colmap_mvs_metal)
+endif()
 
 COLMAP_ADD_TEST(
     NAME image_test

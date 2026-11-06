@@ -585,6 +585,13 @@ else()
 endif()
 
 if(METAL_ENABLED AND APPLE)
+    # Use the same compiler and C++ standard library for all Metal backends.
+    if(NOT CMAKE_OBJCXX_COMPILER AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(CMAKE_OBJCXX_COMPILER "${CMAKE_CXX_COMPILER}")
+    endif()
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
     list(APPEND COLMAP_COMPILE_DEFINITIONS COLMAP_METAL_ENABLED)
     message(STATUS "Enabling Metal GPU support")
 else()
@@ -592,6 +599,19 @@ else()
     if(APPLE AND NOT METAL_ENABLED)
         message(STATUS "Disabling Metal support")
     endif()
+endif()
+
+# Metal SIFT and image warping also work in sparse-only builds. Keep the
+# dense stereo backend separate, and prefer CUDA when both are available.
+set(METAL_MVS_ENABLED OFF)
+if(METAL_ENABLED AND MVS_ENABLED AND NOT CUDA_ENABLED AND
+   CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(METAL_MVS_ENABLED ON)
+    list(APPEND COLMAP_COMPILE_DEFINITIONS COLMAP_METAL_MVS_ENABLED)
+    message(STATUS "Enabling Metal patch match stereo")
+endif()
+if(MVS_ENABLED AND (CUDA_ENABLED OR METAL_MVS_ENABLED))
+    list(APPEND COLMAP_COMPILE_DEFINITIONS COLMAP_PATCH_MATCH_ENABLED)
 endif()
 
 set(GPU_ENABLED OFF)

@@ -281,3 +281,41 @@ if(CUDA_ENABLED)
         LINK_LIBS colmap_mvs_cuda
     )
 endif()
+
+# Compile the embedded PatchMatch shader source at runtime. The existing
+# SIFT and image warp backends continue to build their offline metallibs.
+if(METAL_MVS_ENABLED)
+    file(READ ${CMAKE_CURRENT_SOURCE_DIR}/patch_match_metal.metal
+         COLMAP_METAL_SHADER_SOURCE)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                 ${CMAKE_CURRENT_SOURCE_DIR}/patch_match_metal.metal)
+    set(COLMAP_METAL_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/patch_match_metal_source.h.in
+        ${COLMAP_METAL_GENERATED_DIR}/colmap/mvs/patch_match_metal_source.h
+        @ONLY)
+
+    COLMAP_ADD_LIBRARY(
+        NAME colmap_mvs_metal
+        SRCS
+            patch_match.h patch_match.cc
+            patch_match_metal.h patch_match_metal.mm
+            patch_match_metal.metal
+        PUBLIC_LINK_LIBS
+            colmap_mvs
+            "-framework Metal"
+            "-framework Foundation"
+    )
+    target_include_directories(colmap_mvs_metal
+        PRIVATE ${COLMAP_METAL_GENERATED_DIR})
+    target_compile_options(colmap_mvs_metal
+        PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    set_source_files_properties(patch_match_metal.metal
+        PROPERTIES HEADER_FILE_ONLY TRUE)
+
+    COLMAP_ADD_TEST(
+        NAME patch_match_metal_test
+        SRCS patch_match_metal_test.cc
+        LINK_LIBS colmap_mvs_metal
+    )
+endif()

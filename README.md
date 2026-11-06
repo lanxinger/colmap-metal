@@ -33,9 +33,12 @@ on macOS, supported model subgraphs can run through CoreML, with CPU fallbacks
 for unsupported operations or models. ONNX brute-force matching runs on CPU.
 See the [feature and matcher guide](doc/features.rst) for model options.
 
-Dense stereo/PatchMatch and GPU bundle adjustment remain CUDA-backed; this fork
-does not implement those stages in Metal. Sparse mapping and bundle adjustment
-run on CPU in a Metal-only build.
+Dense stereo/PatchMatch also runs through Metal on macOS when `MVS_ENABLED=ON`
+and CUDA is disabled. It uses the same reconstruction formats and algorithm as
+the CUDA backend, with a different random number generator. Source textures
+use private GPU storage with explicit uploads for compatibility with Apple,
+Intel and AMD Metal GPUs. Intel and AMD hardware still need runtime validation.
+Sparse mapping and bundle adjustment run on CPU in a Metal-only build.
 
 ### Build a sparse desktop CLI
 
@@ -79,6 +82,29 @@ The desktop hash-container backend defaults to `STD`.
 `-DCOLMAP_HASH_MAP_BACKEND=BOOST` requires Boost 1.84 or newer. This choice is part
 of the C++ ABI: COLMAP, PyCOLMAP and other libraries sharing COLMAP objects in one
 process must use the same backend. See the [build notes](doc/install.rst).
+
+### Enable dense reconstruction
+
+Configure the desktop build above with `-DMVS_ENABLED=ON` to add Metal
+`patch_match_stereo`, automatic dense reconstruction, the GUI stereo action
+and the corresponding PyCOLMAP entry point. Metal SIFT and image warping stay
+available with either value of `MVS_ENABLED`.
+
+For a workspace prepared by `image_undistorter`, run:
+
+```bash
+build-metal/src/colmap/exe/colmap patch_match_stereo \
+  --workspace_path path/to/dense --workspace_format COLMAP
+build-metal/src/colmap/exe/colmap stereo_fusion \
+  --workspace_path path/to/dense --workspace_format COLMAP \
+  --input_type geometric --output_path path/to/dense/fused.ply
+```
+
+The backend accepts window radii 1–20, window steps 1–2 and up to 2048 source
+images. Source dimensions must not exceed 16384 pixels. Memory requirements
+grow with image resolution and source count; reduce `PatchMatchStereo.max_image_size`
+or the number of source images when needed. GPU indices enumerate Metal devices;
+the default runs one worker per device.
 
 ### Reconstruct a sparse model
 
@@ -230,6 +256,10 @@ The Metal SIFT implementation is based on
 Swift host code rewritten in Objective-C++ for CMake integration. See the
 [bundled implementation notes](src/thirdparty/SiftMetal/README.md) and
 [Apple package dependency notices](ios/THIRD_PARTY_NOTICES.md) for attribution.
+
+The Metal dense stereo implementation is adapted from
+[Tobias Fischer's COLMAP PR #4944](https://github.com/colmap/colmap/pull/4944),
+with fork-specific backend selection and portable texture uploads.
 
 Acknowledgments
 ---------------

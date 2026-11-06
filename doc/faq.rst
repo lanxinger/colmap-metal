@@ -476,8 +476,9 @@ change during these steps.
 Available functionality without GPU/CUDA
 ----------------------------------------
 
-If you do not have a CUDA-enabled GPU but some other GPU, you can use all COLMAP
-functionality except the dense reconstruction part. However, you can use
+Dense reconstruction requires CUDA or the macOS Metal backend. On macOS,
+build with ``METAL_ENABLED=ON`` and ``MVS_ENABLED=ON`` to use Metal for dense
+stereo without CUDA. On systems without either backend, you can use
 external dense reconstruction software as an alternative, as described in the
 :ref:`Tutorial <dense-reconstruction>`. If you have a GPU with low compute power
 or you want to execute COLMAP on a machine without an attached display and
@@ -784,7 +785,9 @@ for CUDA-enabled GPUs, e.g., ``--PatchMatchStereo.gpu_index=0,1,2,3`` runs the d
 reconstruction on 4 GPUs in parallel. You can also run multiple dense
 reconstruction threads on the same GPU by specifying the same GPU index twice,
 e.g., ``--PatchMatchStereo.gpu_index=0,0,1,1,2,3``. By default, COLMAP runs one
-dense reconstruction thread per CUDA-enabled GPU.
+dense reconstruction thread per CUDA-enabled GPU. With Metal, the indices
+refer to the enumerated Metal devices and the default is also one worker per
+device.
 
 
 .. _faq-dense-timeout:

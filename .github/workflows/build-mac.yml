@@ -36,14 +36,20 @@ jobs:
           git diff --exit-code || (echo "Code formatting failed" && exit 1)
 
   build:
-    name: macos-15 arm64 Release ${{ matrix.hash_backend }}
+    name: macos-15 arm64 Release ${{ matrix.hash_backend }} MVS=${{ matrix.mvs_enabled }}
     needs: format
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        hash_backend: [STD, BOOST]
+        include:
+          - hash_backend: STD
+            mvs_enabled: 'OFF'
+          - hash_backend: BOOST
+            mvs_enabled: 'OFF'
+          - hash_backend: STD
+            mvs_enabled: 'ON'
 
     env:
       COMPILER_CACHE_VERSION: 1
@@ -62,7 +68,7 @@ jobs:
         uses: actions/cache@v6
         id: cache-compiler
         with:
-          key: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release-${{ matrix.hash_backend }}-${{ github.run_id }}-${{ github.run_number }}
+          key: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release-${{ matrix.hash_backend }}-MVS-${{ matrix.mvs_enabled }}-${{ github.run_id }}-${{ github.run_number }}
           restore-keys: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release
           path: ${{ env.COMPILER_CACHE_DIR }}
 
@@ -114,7 +120,7 @@ jobs:
             -DFETCH_ONNX=OFF \
             -DGUI_ENABLED=OFF \
             -DMETAL_ENABLED=ON \
-            -DMVS_ENABLED=OFF \
+            -DMVS_ENABLED=${{ matrix.mvs_enabled }} \
             -DONNX_ENABLED=OFF \
             -DOPENGL_ENABLED=OFF \
             -DTESTS_ENABLED=ON \

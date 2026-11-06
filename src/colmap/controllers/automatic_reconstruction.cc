@@ -466,7 +466,7 @@ void AutomaticReconstructionController::RunDenseMapper() {
 
     // Patch match stereo.
 
-#if defined(COLMAP_CUDA_ENABLED)
+#if defined(COLMAP_PATCH_MATCH_ENABLED)
     {
       mvs::PatchMatchController patch_match_controller(
           *option_manager_.patch_match_stereo, dense_path, "COLMAP", "");
@@ -474,10 +474,11 @@ void AutomaticReconstructionController::RunDenseMapper() {
           [&]() { return IsStopped(); });
       patch_match_controller.Run();
     }
-#else   // COLMAP_CUDA_ENABLED
-    LOG(WARNING) << "Skipping patch match stereo because CUDA is not available";
+#else   // COLMAP_PATCH_MATCH_ENABLED
+    LOG(WARNING)
+        << "Skipping patch match stereo because no GPU backend is available";
     return;
-#endif  // COLMAP_CUDA_ENABLED
+#endif  // COLMAP_PATCH_MATCH_ENABLED
 
     if (IsStopped()) {
       return;

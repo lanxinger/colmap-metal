@@ -76,6 +76,10 @@ if(CUDA_ENABLED)
     endif()
 endif()
 
+if(METAL_MVS_ENABLED)
+    target_link_libraries(colmap_controllers PRIVATE colmap_mvs_metal)
+endif()
+
 COLMAP_ADD_TEST(
     NAME automatic_reconstruction_test
     SRCS automatic_reconstruction_test.cc

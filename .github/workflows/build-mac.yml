@@ -36,28 +36,19 @@ jobs:
           git diff --exit-code || (echo "Code formatting failed" && exit 1)
 
   build:
-    name: macos-15 arm64 Release ${{ matrix.hash_backend }} MVS=${{ matrix.mvs_enabled }}
+    name: macos-15 arm64 Release
     needs: format
     runs-on: macos-15
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - hash_backend: STD
-            mvs_enabled: 'OFF'
-          - hash_backend: BOOST
-            mvs_enabled: 'OFF'
-          - hash_backend: STD
-            mvs_enabled: 'ON'
+    # Run every configuration on one host to reduce arm64 runner requests.
 
     env:
       COMPILER_CACHE_VERSION: 1
       COMPILER_CACHE_DIR: ${{ github.workspace }}/compiler-cache
       CCACHE_DIR: ${{ github.workspace }}/compiler-cache/ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
-      FETCHCONTENT_CACHE_VERSION: 1
-      FETCHCONTENT_CACHE_DIR: ${{ github.workspace }}/build/_deps
+      FETCHCONTENT_CACHE_VERSION: 2
+      FETCHCONTENT_CACHE_DIR: ${{ github.workspace }}/build-mac/*/_deps
       GLOG_v: 2
       GLOG_logtostderr: 1
 
@@ -68,7 +59,7 @@ jobs:
         uses: actions/cache@v6
         id: cache-compiler
         with:
-          key: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release-${{ matrix.hash_backend }}-MVS-${{ matrix.mvs_enabled }}-${{ github.run_id }}-${{ github.run_number }}
+          key: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: v${{ env.COMPILER_CACHE_VERSION }}-macos-15-arm64-Release
           path: ${{ env.COMPILER_CACHE_DIR }}
 
@@ -98,53 +89,20 @@ jobs:
             libomp
           brew link --force libomp
 
-      - name: Configure and build
-        run: |
-          cmake --version
-          mkdir -p build
-          cd build
-          # Exercise the default in the STD job and the explicit BOOST option.
-          hash_backend="${{ matrix.hash_backend }}"
-          if [ "$hash_backend" = STD ]; then
-            hash_backend=""
-          fi
-          cmake .. \
-            -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCOLMAP_HASH_MAP_BACKEND="$hash_backend" \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCCACHE_ENABLED=ON \
-            -DCGAL_ENABLED=OFF \
-            -DCUDA_ENABLED=OFF \
-            -DDOWNLOAD_ENABLED=OFF \
-            -DFETCH_ONNX=OFF \
-            -DGUI_ENABLED=OFF \
-            -DMETAL_ENABLED=ON \
-            -DMVS_ENABLED=${{ matrix.mvs_enabled }} \
-            -DONNX_ENABLED=OFF \
-            -DOPENGL_ENABLED=OFF \
-            -DTESTS_ENABLED=ON \
-            -DWERROR_ENABLED=ON \
-            -DFETCHCONTENT_FULLY_DISCONNECTED=${{ steps.cache-fetchcontent.outputs.cache-hit == 'true' && 'ON' || 'OFF' }}
-          ninja
+      - name: Build and test STD / MVS=OFF
+        env:
+          FETCHCONTENT_FULLY_DISCONNECTED: ${{ steps.cache-fetchcontent.outputs.cache-hit == 'true' && 'ON' || 'OFF' }}
+        run: bash scripts/ci-macos.sh STD OFF
 
-      - name: Run tests
-        run: |
-          cd build
-          ctest --output-on-failure --no-tests=error
+      - name: Build and test BOOST / MVS=OFF
+        env:
+          FETCHCONTENT_FULLY_DISCONNECTED: ${{ steps.cache-fetchcontent.outputs.cache-hit == 'true' && 'ON' || 'OFF' }}
+        run: bash scripts/ci-macos.sh BOOST OFF
 
-      - name: Test installed hash backend
-        run: |
-          cmake --install build --prefix "$RUNNER_TEMP/colmap-install"
-          for requested in STD BOOST; do
-            cmake -S cmake/tests/hash_map_backend -B "build-consumer-$requested" \
-              -GNinja \
-              -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/colmap-install" \
-              -DCOLMAP_HASH_MAP_BACKEND="$requested" \
-              -DEXPECTED_HASH_MAP_BACKEND=${{ matrix.hash_backend }}
-            cmake --build "build-consumer-$requested"
-            "build-consumer-$requested/hash_map_backend_test"
-          done
+      - name: Build and test STD / MVS=ON
+        env:
+          FETCHCONTENT_FULLY_DISCONNECTED: ${{ steps.cache-fetchcontent.outputs.cache-hit == 'true' && 'ON' || 'OFF' }}
+        run: bash scripts/ci-macos.sh STD ON
 
       - name: Cleanup compiler cache
         run: |

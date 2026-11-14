@@ -67,7 +67,8 @@ still require device validation.
 
 Build logs and package provenance are retained as CI artifacts. The separate
 `COLMAP (Mac)` workflow checks formatting once, then builds and runs the desktop
-Metal/C++ test suite with both STD and BOOST hash backends.
+Metal/C++ test suite on one arm64 runner with STD and BOOST hash backends
+(MVS disabled) and with the STD backend and MVS enabled.
 
 ## Capture and reconstruction contract
 
@@ -369,6 +370,6 @@ accepted the extra runtime in favor of the earlier measured quality gain; this
 single app run is not a matched quality comparison or a general latency guarantee.
 
 Original guided ObjectCapture HEIC metadata and lens correction still require a
-fresh capture check. The integration currently uses a verified local sibling
-package snapshot; a standalone Plinth clone needs that snapshot and generated
-artifacts until a reviewed package revision is published.
+fresh capture check. Plinth's checked-in `Package.resolved` now pins this
+repository's published `0.1.0` release as a remote Swift package, so a standalone
+Plinth clone no longer needs a local sibling snapshot or generated artifacts.

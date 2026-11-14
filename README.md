@@ -165,8 +165,10 @@ cmake --build build-metal --parallel "$(sysctl -n hw.ncpu)"
 ctest --test-dir build-metal --output-on-failure
 ```
 
-The [Mac CI workflow](.github/workflows/build-mac.yml) exercises the Metal build
-with both hash backends. Benchmark-script tests check reporting and selection,
+The [Mac CI workflow](.github/workflows/build-mac.yml) runs
+[`scripts/ci-macos.sh`](scripts/ci-macos.sh) for three Metal configurations on
+one arm64 runner: STD and BOOST hash backends with `MVS_ENABLED=OFF`, and STD
+with `MVS_ENABLED=ON`. Benchmark-script tests check reporting and selection,
 not GPU correctness or speed.
 
 ColmapSparse Swift package (iOS and macOS)
